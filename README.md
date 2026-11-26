@@ -2,13 +2,13 @@
 
 Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed-title launcher. The game is not distributed with this repository.
 
-## R34
+## R35
 
 PE32 loader, guest memory, stack, TEB, isolated heap, import table with synthetic dispatch tokens, partial x86 integer interpreter and partial Win32 process services. Threshold graphs implement integer add/subtract/XOR; multiplication, division, and other operations still use native C arithmetic. Not a full neural implementation of Windows.
 
-Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R34.log`.
+Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R35.log`.
 
-Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R34 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
+Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R35 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
 
 Limitations: simulated XP-compatible process environment, single-thread critical sections and TLS, fixed 8 MiB guest heap, limited CP1252 and Latin case mapping/classification, no full file system, DLL loader, Direct3D, audio, or full x86 support. Host trace is not a proof of Windows semantic equivalence or game playability. Unknown functions stop execution.
 
@@ -21,3 +21,5 @@ R32 introduces an ANSI USER32 model: class registration, virtual top-level windo
 R33 adds a read-only game resource filesystem rooted at the Switch game directory. Supports CreateFile A/W (read-only OPEN_EXISTING), ReadFile, file size, seek, close, file type and limited attributes/current directory. Rejects parent traversal, other drives, device names and write/create requests. Host access to real resources is disabled; the host fixture uses a temporary synthetic stream. Limits: 64 open files, 1 MiB per read, ASCII names, no directory enumeration, no asynchronous IO, no full Windows sharing semantics.
 
 R34 retains the final 32 executed instructions and register state for diagnosis. R33–R34 fixtures and builds are not yet verified; no new GTA execution count is claimed.
+
+R35 adds an experimental D3D9 COM interface: Direct3DCreate9, guest vtables, one windowed CPU reference device (up to 1920x1080), color-only Clear, BeginScene/EndScene, Present with FNV-1a checksum, and reference counting. Present hashes pixels but does not display them. No drawing, shaders, depth buffer, texture support, native GPU or full COM compatibility. Unsupported methods stop; unsupported device configurations return an error. The synthetic fixture expects 0x91193335 from a 4x3 buffer cleared to 0xff123456; execution is not yet verified. This is not a GTA-rendered frame.
