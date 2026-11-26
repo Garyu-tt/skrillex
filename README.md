@@ -1,7 +1,13 @@
 # Skrillex
 
-Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed title launcher. R06 is a PE32 loader and limited instruction interpreter, not a working game runtime. Win32 imports and D3D9 remain unimplemented. The game is not distributed with this repository.
+Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed-title launcher. The game is not distributed with this repository.
 
-Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. The NRO logs executed instructions and stops at unsupported instructions. Build with devkitPro/libnx.
+## R16
 
-R06 host trace: 39 guest instructions; first unresolved import KERNEL32.dll!GetVersionExA. R05 physical Switch: 27 instructions. R06 hardware result is not yet verified. Threshold graphs implement integer add/subtract/XOR; multiplication and division currently use native C arithmetic, not synthesized graphs.
+PE32 loader, guest memory, stack, TEB, isolated heap, import table with synthetic dispatch tokens, partial x86 integer interpreter and partial Win32 process services. Threshold graphs implement integer add/subtract/XOR; multiplication, division, and other operations still use native C arithmetic. Not a full neural implementation of Windows.
+
+Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R16.log`.
+
+Host trace on a locally held game copy: 2202 guest instructions, 43 API calls, 214 PE imports bound to dispatch tokens (not 214 implemented APIs). Stops at KERNEL32.dll!GetCPInfo. ALU selftest passed 3072 arithmetic and 65536 byte comparison cases plus flag checks. Physical hardware previously verified R03–R05; R16 not yet verified on Switch.
+
+Limitations: simulated XP-compatible process environment, single-thread critical sections and TLS, fixed 8 MiB guest heap, CP1252 only, no full file system, DLL loader, Direct3D, audio, or full x86 support. Host trace is not a proof of Windows semantic equivalence or game playability. Unknown functions stop execution.
