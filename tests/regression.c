@@ -142,6 +142,23 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
  assert(d3d_fixture_call(com_token(dev,17),(uint32_t[]){dev,0,0,0,0},5)==0&&d3d_frames==1);
  assert(d3d_hash==0x91193335u);
+ /* Actual guest vertex data: a triangle covering six pixels of a 4x3 target. */
+ uint32_t vertices=base+0x200;
+ const float coords[3][4]={{0,0,0,1},{3,0,0,1},{0,3,0,1}};
+ for(unsigned i=0;i<3;i++){memcpy(image+0x200+20*i,coords[i],16);write32(vertices+20*i+16,0xff00ff00);}
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,20},5)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,89),(uint32_t[]){dev,0x44},2)==0);
+ assert(d3d_fixture_call(com_token(dev,90),(uint32_t[]){dev,base+0x190},2)==0&&read32(base+0x190)==0x44);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,20},5)==0&&d3d_draws==1);
+ unsigned green=0;for(unsigned y=0;y<3;y++)for(unsigned x=0;x<4;x++){
+  uint32_t expected=x+y<3?0xff00ff00:0xff123456;
+  assert(color_buffer[y*4+x]==expected);green+=expected==0xff00ff00;
+ }assert(green==6);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,17),(uint32_t[]){dev,0,0,0,0},5)==0&&d3d_frames==2&&d3d_hash==0x3d35d94du);
+
  assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,2,0,0,0},7)==D3D_INVALID);
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!d3d_root.refs);
