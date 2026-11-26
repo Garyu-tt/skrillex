@@ -376,7 +376,10 @@ static unsigned d3d_draws;
 #define VB_MAX 32u
 typedef struct{D3DObject com;uint32_t data,length,usage,fvf,pool;unsigned locked;} GuestVB;
 static GuestVB vertex_buffers[VB_MAX];static GuestVB* stream0;static uint32_t stream_offset,stream_stride;
-static void vb_reset(void){memset(vertex_buffers,0,sizeof vertex_buffers);stream0=NULL;stream_offset=stream_stride=0;}
+#define IB_MAX 32u
+typedef struct{D3DObject com;uint32_t data,length,usage,format,pool;unsigned locked;} GuestIB;
+static GuestIB index_buffers[IB_MAX];static GuestIB* index_stream;
+static void vb_reset(void){memset(vertex_buffers,0,sizeof vertex_buffers);stream0=NULL;stream_offset=stream_stride=0;memset(index_buffers,0,sizeof index_buffers);index_stream=NULL;}
 static void d3d_cleanup(void){vb_reset();free(color_buffer);free(depth_buffer);color_buffer=NULL;depth_buffer=NULL;depth_enable=depth_write=0;depth_func=4;d3d_root=(D3DObject){0};d3d_device=(D3DObject){0};d3d_width=d3d_height=d3d_scene=0;}
 static int d3d_object(D3DObject*o,unsigned count,const char*const*names){
  if(!heap)return 0;
@@ -461,9 +464,50 @@ static int vb_call(const char*n,unsigned*argc,uint32_t*ret){
  }
  return 0;
 }
+static GuestIB* ib_find(uint32_t obj){for(unsigned i=0;i<IB_MAX;i++)if(index_buffers[i].com.refs&&index_buffers[i].com.obj==obj)return &index_buffers[i];return NULL;}
+static int ib_live(void){for(unsigned i=0;i<IB_MAX;i++)if(index_buffers[i].com.refs)return 1;return 0;}
+static void ib_unref(GuestIB*b){if(!--b->com.refs){HeapBlock*blk=find_block(HEAPBASE,b->data);if(blk)blk->live=0;b->locked=0;}}
+static int ib_call(const char*n,unsigned*argc,uint32_t*ret){
+ GuestIB*b=ib_find(arg(0));if(!b)return 0;*ret=D3D_INVALID;
+ if(!strcmp(n,"IBAddRef")){*argc=1;if(b->com.refs==UINT32_MAX)return 0;*ret=++b->com.refs;return 1;}
+ if(!strcmp(n,"IBRelease")){*argc=1;if(b->locked&&b->com.refs==1)return 0;ib_unref(b);*ret=b->com.refs;return 1;}
+ if(!strcmp(n,"IBLock")){
+  *argc=5;uint32_t off=arg(1),len=arg(2),out=arg(3),flags=arg(4);
+  if(b->locked||flags||off>=b->length||len>b->length-off||!out)return 1;
+  if(!ptr(out,4))return 0;
+  b->locked=1;write32(out,b->data+off);*ret=0;return !fault;
+ }
+ if(!strcmp(n,"IBUnlock")){*argc=1;if(b->locked){b->locked=0;*ret=0;}return 1;}
+ if(!strcmp(n,"IBGetDesc")){
+  *argc=2;uint32_t out=arg(1);if(!ptr(out,20))return 0;
+  uint32_t fields[]={b->format,7,b->usage,b->pool,b->length};
+  for(unsigned i=0;i<5;i++)write32(out+4*i,fields[i]);
+  *ret=0;return !fault;
+ }
+ return 0;
+}
+static int draw_indexed(uint32_t kind,int32_t basevert,uint32_t minidx,uint32_t nvert,uint32_t first,uint32_t count){
+ if(!d3d_scene||d3d_fvf!=0x44||!stream0||stream0->locked||!index_stream||index_stream->locked||!nvert||!count||count>256||(kind!=4&&kind!=5&&kind!=6))return 0;
+ if((uint64_t)count*d3d_width*d3d_height>UINT64_C(32000000))return 0;
+ unsigned ni=kind==4?count*3:count+2,iw=index_stream->format==101?2:4;
+ uint64_t off=(uint64_t)first*iw;
+ if(off+(uint64_t)ni*iw>index_stream->length)return 0;
+ uint8_t*idx=ptr(index_stream->data+(uint32_t)off,ni*iw);if(!idx)return 0;
+ RasterVertex v[768];
+ for(unsigned i=0;i<ni;i++){
+  uint32_t ix=iw==2?le16(idx+i*iw):le32(idx+i*iw);
+  if(ix<minidx||(uint64_t)ix-minidx>=nvert)return 0;
+  int64_t vi=(int64_t)basevert+ix;if(vi<0)return 0;
+  uint64_t voff=(uint64_t)stream_offset+(uint64_t)vi*stream_stride;
+  if(voff+20>stream0->length)return 0;
+  uint8_t*p=ptr(stream0->data+(uint32_t)voff,20);if(!p||!raster_vertex(p,&v[i]))return 0;
+ }
+ for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;raster_triangle(v[a],v[b],v[c]);}
+ d3d_draws++;return 1;
+}
 static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  static const char*const root_methods[17]={[1]="RootAddRef",[2]="RootRelease",[4]="GetAdapterCount",[16]="CreateDevice"};
- static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[26]="CreateVertexBuffer",[41]="BeginScene",[42]="EndScene",[43]="Clear",[57]="SetRenderState",[58]="GetRenderState",[81]="DrawPrimitive",[83]="DrawPrimitiveUP",[89]="SetFVF",[90]="GetFVF",[100]="SetStreamSource",[101]="GetStreamSource"};
+ static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[26]="CreateVertexBuffer",[27]="CreateIndexBuffer",[41]="BeginScene",[42]="EndScene",[43]="Clear",[57]="SetRenderState",[58]="GetRenderState",[81]="DrawPrimitive",[82]="DrawIndexedPrimitive",[83]="DrawPrimitiveUP",[89]="SetFVF",[90]="GetFVF",[100]="SetStreamSource",[101]="GetStreamSource",[104]="SetIndices",[105]="GetIndices"};
  if(!strcmp(n,"Direct3DCreate9")){
   *argc=1;if(arg(0)!=32)return 1;
   if(d3d_root.refs){if(d3d_root.refs==UINT32_MAX)return 0;d3d_root.refs++;*ret=d3d_root.obj;return 1;}
@@ -471,13 +515,14 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
   *ret=d3d_root.obj;return 1;
  }
  if(!strncmp(n,"VB",2))return vb_call(n,argc,ret);
+ if(!strncmp(n,"IB",2))return ib_call(n,argc,ret);
  if(!strcmp(n,"UnsupportedMethod")){report("Unsupported D3D9 COM method\n");return 0;}
  uint32_t self=arg(0);
  if(!strcmp(n,"RootAddRef")||!strcmp(n,"RootRelease")||!strcmp(n,"DeviceAddRef")||!strcmp(n,"DeviceRelease")){
   *argc=1;D3DObject*o=n[0]=='R'?&d3d_root:&d3d_device;
   if(!o->refs||self!=o->obj)return 0;
   if(strstr(n,"AddRef")){if(o->refs==UINT32_MAX)return 0;*ret=++o->refs;}
-  else{if(o==&d3d_device&&o->refs==1&&vb_live()){report("Release vertex buffers and unbind stream before device release\n");return 0;}if(o==&d3d_root&&o->refs==1&&d3d_device.refs){report("D3D parent reference retained by device\n");return 0;}*ret=--o->refs;if(!o->refs&&o==&d3d_device){free(color_buffer);free(depth_buffer);color_buffer=NULL;depth_buffer=NULL;d3d_scene=0;if(d3d_root.refs)d3d_root.refs--;}}
+  else{if(o==&d3d_device&&o->refs==1&&(vb_live()||ib_live())){report("Release vertex/index buffers and unbind streams before device release\n");return 0;}if(o==&d3d_root&&o->refs==1&&d3d_device.refs){report("D3D parent reference retained by device\n");return 0;}*ret=--o->refs;if(!o->refs&&o==&d3d_device){free(color_buffer);free(depth_buffer);color_buffer=NULL;depth_buffer=NULL;d3d_scene=0;if(d3d_root.refs)d3d_root.refs--;}}
   return 1;
  }
  if(!strcmp(n,"GetAdapterCount")){*argc=1;if(self!=d3d_root.obj||!d3d_root.refs)return 0;*ret=1;return 1;}
@@ -505,6 +550,35 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  if(!strcmp(n,"TestCooperativeLevel")){*argc=1;*ret=0;return 1;}
  if(!strcmp(n,"BeginScene")){*argc=1;if(!d3d_scene){d3d_scene=1;*ret=0;}return 1;}
  if(!strcmp(n,"EndScene")){*argc=1;if(d3d_scene){d3d_scene=0;*ret=0;}return 1;}
+ if(!strcmp(n,"CreateIndexBuffer")){
+  static const char*const methods[14]={[1]="IBAddRef",[2]="IBRelease",[11]="IBLock",[12]="IBUnlock",[13]="IBGetDesc"};
+  *argc=7;uint32_t len=arg(1),usage=arg(2),fmt=arg(3),pool=arg(4),out=arg(5),shared=arg(6);
+  if(!ptr(out,4))return 0;
+  write32(out,0);
+  if(!len||len>2u*1024u*1024u||(usage&~8u)||(fmt!=101&&fmt!=102)||len%(fmt==101?2:4)||pool>2||shared)return 1;
+  GuestIB*b=NULL;for(unsigned i=0;i<IB_MAX;i++)if(!index_buffers[i].com.refs){b=&index_buffers[i];break;}
+  if(!b){*ret=D3D_OUTOFMEMORY;return 1;}
+  uint32_t data=heap_alloc(HEAPBASE,8,len);if(!data){*ret=D3D_OUTOFMEMORY;return 1;}
+  D3DObject obj;if(!d3d_object(&obj,14,methods)){HeapBlock*blk=find_block(HEAPBASE,data);if(blk)blk->live=0;*ret=D3D_OUTOFMEMORY;return !fault;}
+  *b=(GuestIB){obj,data,len,usage,fmt,pool,0};write32(out,obj.obj);*ret=0;return 1;
+ }
+ if(!strcmp(n,"SetIndices")){
+  *argc=2;uint32_t obj=arg(1);GuestIB*b=obj?ib_find(obj):NULL;
+  if(obj&&(!b||b->locked||b->com.refs==UINT32_MAX))return 1;
+  if(b)b->com.refs++;
+  if(index_stream)ib_unref(index_stream);
+  index_stream=b;*ret=0;return 1;
+ }
+ if(!strcmp(n,"GetIndices")){
+  *argc=2;uint32_t out=arg(1);if(!ptr(out,4))return 0;
+  if(index_stream&&index_stream->com.refs==UINT32_MAX)return 0;
+  if(index_stream)index_stream->com.refs++;
+  write32(out,index_stream?index_stream->com.obj:0);*ret=0;return !fault;
+ }
+ if(!strcmp(n,"DrawIndexedPrimitive")){
+  *argc=7;if(draw_indexed(arg(1),(int32_t)arg(2),arg(3),arg(4),arg(5),arg(6)))*ret=0;
+  return !fault;
+ }
  if(!strcmp(n,"CreateVertexBuffer")){
   static const char*const methods[14]={[1]="VBAddRef",[2]="VBRelease",[11]="VBLock",[12]="VBUnlock",[13]="VBGetDesc"};
   *argc=7;uint32_t len=arg(1),usage=arg(2),fvf=arg(3),pool=arg(4),out=arg(5),shared=arg(6);
@@ -813,12 +887,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R38 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R39 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R38.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R39.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
