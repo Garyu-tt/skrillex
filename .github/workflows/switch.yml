@@ -1,0 +1,31 @@
+name: NeroExec R03 Switch build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native NRO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITA64="$DEVKITPRO/devkitA64"
+          export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
+          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o NeroExec-R03.elf
+          nacptool --create NeroExec InfraCare 0.3.0 NeroExec-R03.nacp
+          elf2nro NeroExec-R03.elf NeroExec-R03.nro --nacp=NeroExec-R03.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
+          test "$(dd if=NeroExec-R03.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
+          sha256sum NeroExec-R03.nro > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NeroExec-R03-Switch
+          path: |
+            NeroExec-R03.nro
+            SHA256SUMS
+          if-no-files-found: error
