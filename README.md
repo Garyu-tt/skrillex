@@ -2,13 +2,13 @@
 
 Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed-title launcher. The game is not distributed with this repository.
 
-## R44
+## R45
 
 PE32 loader, guest memory, stack, TEB, isolated heap, import table with synthetic dispatch tokens, partial x86 integer interpreter and partial Win32 process services. Threshold graphs implement integer add/subtract/XOR; multiplication, division, and other operations still use native C arithmetic. Not a full neural implementation of Windows.
 
-Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R44.log`.
+Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R45.log`.
 
-Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R44 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
+Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R45 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
 
 Limitations: simulated XP-compatible process environment, single-thread critical sections and TLS, fixed 8 MiB guest heap, limited CP1252 and Latin case mapping/classification, no full file system, DLL loader, Direct3D, audio, or full x86 support. Host trace is not a proof of Windows semantic equivalence or game playability. Unknown functions stop execution.
 
@@ -39,3 +39,5 @@ R41 adds DXT1/3/5 (BC1/2/3) block-compressed storage and per-texel decoding incl
 R43 adds row-vector World/View/Projection matrices and viewport state, XYZ+DIFFUSE and XYZ+DIFFUSE+TEX1 vertices, and reciprocal-W perspective-correct UV interpolation. Matrix and viewport parameters are bounded; vertices outside the homogeneous clip volume reject the draw rather than performing polygon clipping. No normals, lighting, full fixed-function pipeline or native presentation yet. Synthetic tests cover matrix round-trip, translation, viewport, transformed triangle and perspective interpolation. Local GitHub DNS lookup failed again; compilation and test execution remain unverified. Last verified GTA trace remains R28.
 
 R44 replaces whole-draw rejection of ordinary out-of-frustum XYZ vertices with homogeneous Sutherland–Hodgman polygon clipping against the six D3D clip planes and two bounded reciprocal-W guard planes. Interpolates color/UV at intersections, triangulates the surviving polygon, and confines XYZ rasterization to the viewport. Fully outside primitives produce no pixels; invalid nonfinite vertex data still rejects the draw. Applies to UP, vertex-buffer and indexed paths. Tests cover left and near clipping, interpolated UVs, complete culling and NaN rejection. No full lighting, blending, native screen presentation or verified GTA frame. Local DNS for GitHub and raw.githubusercontent.com returned no addresses; R44 build and execution remain unverified.
+
+R45 adds alpha test, alpha blending with source/destination factors, additive/subtractive/min/max operations and per-channel color write masks. Alpha rejection precedes depth writes. The reference implementation has no separate alpha blending or full D3D render-state coverage. Regression includes alpha discard preserving depth, exact source-alpha compositing and masked channel writes. Local DNS remains unavailable, and combined commit status is empty. Compilation and test execution remain unverified; actual GTA trace remains R28.
