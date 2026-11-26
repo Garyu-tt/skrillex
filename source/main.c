@@ -369,7 +369,8 @@ typedef struct{uint32_t obj,table,refs;} D3DObject;
 static D3DObject d3d_root,d3d_device;
 static uint32_t* color_buffer;
 static unsigned d3d_width,d3d_height,d3d_scene,d3d_frames;
-static uint32_t d3d_hash;
+static uint32_t d3d_hash,d3d_fvf;
+static unsigned d3d_draws;
 static void d3d_cleanup(void){free(color_buffer);color_buffer=NULL;d3d_root=(D3DObject){0};d3d_device=(D3DObject){0};d3d_width=d3d_height=d3d_scene=0;}
 static int d3d_object(D3DObject*o,unsigned count,const char*const*names){
  if(!heap)return 0;
@@ -379,9 +380,52 @@ static int d3d_object(D3DObject*o,unsigned count,const char*const*names){
  if(fault)return 0;
  *o=(D3DObject){mem,table,1};return 1;
 }
+/* Reference subset: screen-space XYZRHW + diffuse ARGB; no depth or blending.
+ * Integer subpixel coordinates and top-left coverage make rasterization reproducible. */
+typedef struct{int64_t x,y;uint32_t color;} RasterVertex;
+static int raster_vertex(const uint8_t*p,RasterVertex*out){
+ float x,y,z,rhw;memcpy(&x,p,4);memcpy(&y,p+4,4);memcpy(&z,p+8,4);memcpy(&rhw,p+12,4);
+ if(!(x>=-8192&&x<=8192&&y>=-8192&&y<=8192&&z>=0&&z<=1&&rhw==1.0f))return 0;
+ out->x=(int64_t)((double)x*256.0+(x<0?-0.5:0.5));
+ out->y=(int64_t)((double)y*256.0+(y<0?-0.5:0.5));out->color=le32(p+16);return 1;
+}
+static int64_t raster_edge(RasterVertex a,RasterVertex b,int64_t x,int64_t y){return (b.x-a.x)*(y-a.y)-(b.y-a.y)*(x-a.x);}
+static int raster_top_left(RasterVertex a,RasterVertex b){return b.y<a.y||(b.y==a.y&&b.x>a.x);}
+static int64_t min3(int64_t a,int64_t b,int64_t c){int64_t m=a<b?a:b;return m<c?m:c;}
+static int64_t max3(int64_t a,int64_t b,int64_t c){int64_t m=a>b?a:b;return m>c?m:c;}
+static void raster_triangle(RasterVertex a,RasterVertex b,RasterVertex c){
+ int64_t area=raster_edge(a,b,c.x,c.y);if(!area)return;
+ if(area<0){RasterVertex t=b;b=c;c=t;area=-area;}
+ int64_t l=min3(a.x,b.x,c.x)/256-1,t=min3(a.y,b.y,c.y)/256-1;
+ int64_t rgt=max3(a.x,b.x,c.x)/256+1,btm=max3(a.y,b.y,c.y)/256+1;
+ if(l<0)l=0;
+ if(t<0)t=0;
+ if(rgt>=(int64_t)d3d_width)rgt=d3d_width-1;
+ if(btm>=(int64_t)d3d_height)btm=d3d_height-1;
+ int ta=raster_top_left(b,c),tb=raster_top_left(c,a),tc=raster_top_left(a,b);
+ for(int64_t y=t;y<=btm;y++)for(int64_t x=l;x<=rgt;x++){
+  int64_t px=x*256,py=y*256;
+  int64_t wa=raster_edge(b,c,px,py),wb=raster_edge(c,a,px,py),wc=raster_edge(a,b,px,py);
+  if(wa<0||wb<0||wc<0||(!wa&&!ta)||(!wb&&!tb)||(!wc&&!tc))continue;
+  uint32_t color=0;for(unsigned shift=0;shift<32;shift+=8){
+   int64_t v=wa*((a.color>>shift)&255)+wb*((b.color>>shift)&255)+wc*((c.color>>shift)&255);
+   color|=(uint32_t)((v+area/2)/area)<<shift;
+  }
+  color_buffer[(size_t)y*d3d_width+(size_t)x]=color;
+ }
+}
+static int draw_up(uint32_t kind,uint32_t count,uint32_t addr,uint32_t stride){
+ if(!d3d_scene||d3d_fvf!=0x44||stride<20||stride>256||!count||count>256)return 0;
+ if((uint64_t)count*d3d_width*d3d_height>UINT64_C(32000000))return 0;
+ if(kind!=4&&kind!=5&&kind!=6)return 0;
+ unsigned n=kind==4?count*3:count+2;uint8_t*p=ptr(addr,(n-1)*stride+20);if(!p)return 0;
+ RasterVertex v[768];for(unsigned i=0;i<n;i++)if(!raster_vertex(p+i*stride,&v[i]))return 0;
+ for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;raster_triangle(v[a],v[b],v[c]);}
+ d3d_draws++;return 1;
+}
 static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  static const char*const root_methods[17]={[1]="RootAddRef",[2]="RootRelease",[4]="GetAdapterCount",[16]="CreateDevice"};
- static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[41]="BeginScene",[42]="EndScene",[43]="Clear"};
+ static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[41]="BeginScene",[42]="EndScene",[43]="Clear",[83]="DrawPrimitiveUP",[89]="SetFVF",[90]="GetFVF"};
  if(!strcmp(n,"Direct3DCreate9")){
   *argc=1;if(arg(0)!=32)return 1;
   if(d3d_root.refs){if(d3d_root.refs==UINT32_MAX)return 0;d3d_root.refs++;*ret=d3d_root.obj;return 1;}
@@ -411,7 +455,7 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
   if(!w||!h||w>1920||h>1080){*ret=D3D_NOTAVAILABLE;return 1;}
   uint32_t*buf=calloc((size_t)w*h,sizeof *buf);if(!buf){*ret=D3D_OUTOFMEMORY;return 1;}
   if(!d3d_object(&d3d_device,119,device_methods)){free(buf);*ret=D3D_OUTOFMEMORY;return !fault;}
-  color_buffer=buf;d3d_width=w;d3d_height=h;d3d_scene=0;d3d_root.refs++;
+  color_buffer=buf;d3d_width=w;d3d_height=h;d3d_scene=0;d3d_fvf=0;d3d_root.refs++;
   write32(pp,w);write32(pp+4,h);write32(pp+8,fmt?fmt:22);write32(pp+12,1);write32(out,d3d_device.obj);
   *ret=0;report("D3D9 CPU reference device: %ux%u\n",w,h);return 1;
  }
@@ -420,6 +464,9 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  if(!strcmp(n,"TestCooperativeLevel")){*argc=1;*ret=0;return 1;}
  if(!strcmp(n,"BeginScene")){*argc=1;if(!d3d_scene){d3d_scene=1;*ret=0;}return 1;}
  if(!strcmp(n,"EndScene")){*argc=1;if(d3d_scene){d3d_scene=0;*ret=0;}return 1;}
+ if(!strcmp(n,"SetFVF")){*argc=2;if(arg(1)==0x44){d3d_fvf=0x44;*ret=0;}return 1;}
+ if(!strcmp(n,"GetFVF")){*argc=2;write32(arg(1),d3d_fvf);*ret=0;return !fault;}
+ if(!strcmp(n,"DrawPrimitiveUP")){*argc=5;if(draw_up(arg(1),arg(2),arg(3),arg(4)))*ret=0;return !fault;}
  if(!strcmp(n,"Clear")){
   *argc=7;uint32_t count=arg(1),rect=arg(2),flags=arg(3),color=arg(4);
   if(count||rect||flags!=1)return 1;
@@ -678,12 +725,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R35 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R36 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R35.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R36.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
