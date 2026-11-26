@@ -327,6 +327,34 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(mtex,19),(uint32_t[]){mtex,4,base+0x1b0,0,0},5)==D3D_INVALID);
  assert(d3d_fixture_call(com_token(mtex,2),(uint32_t[]){mtex},1)==1);
  assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,0},3)==0&&!texture_find(mtex));
+ /* XYZ vertices: row-vector transform, viewport, rejection and perspective UV. */
+ uint32_t mat=base+0x300,vp=base+0x340;
+ float world[16]={1,0,0,0,0,1,0,0,0,0,1,0,0.25f,0,0,1};
+ memcpy(image+0x300,world,64);
+ assert(d3d_fixture_call(com_token(dev,44),(uint32_t[]){dev,256,mat},3)==0);
+ assert(d3d_fixture_call(com_token(dev,45),(uint32_t[]){dev,256,base+0x380},3)==0&&!memcmp(image+0x380,world,64));
+ double projected[4];assert(transform_position(-0.25f,0,0.5f,projected));
+ assert(projected[0]==2&&projected[1]==1.5&&projected[2]==0.5&&projected[3]==1);
+ assert(!transform_position(1,0,0.5f,projected));
+ write32(vp,1);write32(vp+4,0);write32(vp+8,2);write32(vp+12,2);write32(vp+16,0);write32(vp+20,0x3f800000);
+ assert(d3d_fixture_call(com_token(dev,47),(uint32_t[]){dev,vp},2)==0);
+ assert(d3d_fixture_call(com_token(dev,48),(uint32_t[]){dev,base+0x380},2)==0&&!memcmp(image+0x340,image+0x380,24));
+ assert(transform_position(-0.25f,0,0.5f,projected)&&projected[0]==2&&projected[1]==1);
+ write32(vp+8,4);assert(d3d_fixture_call(com_token(dev,47),(uint32_t[]){dev,vp},2)==D3D_INVALID);
+ transform_reset();
+ assert(d3d_fixture_call(com_token(dev,89),(uint32_t[]){dev,0x42},2)==0);
+ const float xyz[3][3]={{-1,1,0.5f},{0.5f,1,0.5f},{-1,-1,0.5f}};
+ for(unsigned i=0;i<3;i++){memcpy(image+0x200+16*i,xyz[i],12);write32(vertices+16*i+12,0xffffff00);}
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff000000,0,0},7)==0);
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==0);
+ assert(color_buffer[0]==0xffffff00&&color_buffer[3]==0xff000000);
+ write32(vertices,0xc0000000);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
+ RasterVertex pa={.u=0,.v=65536,.rhw=1048576},pb={.u=65536,.v=0,.rhw=524288},pc={.u=0,.v=0,.rhw=1048576};
+ assert(perspective_uv(1,1,0,pa,pb,pc,0)==21845);
+ assert(perspective_uv(1,1,0,pa,pb,pc,1)==43690);
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
