@@ -92,12 +92,28 @@ static uint32_t shift_group(unsigned g,uint32_t a,unsigned count,unsigned width)
  if(count==1)oflag=g==4?((a>>(width-1))^cflag):g==5?sign:0;
  commonflags(a);sflag=a>>(width-1);return a;
 }
+/* XADD: sample both operands, exchange source, then store the sum.
+ * Store destination last for the register-alias case. */
+static int xadd(unsigned ext,unsigned fs,unsigned os16,unsigned locked){
+ unsigned mm=byte();Operand dst=decode(mm,fs),src={1,mm>>3&7,0};
+ if(fault||(locked&&dst.reg))return 0;
+ unsigned width=ext==0xc0?8:os16?16:32;
+ uint32_t a=width==8?get8(dst):width==16?get16(dst):get(dst);
+ uint32_t b=width==8?get8(src):width==16?get16(src):get(src);
+ if(fault)return 0;
+ uint32_t sum=width==8?alu8(0,a,b):width==16?alu16(0,a,b):alu(0,a,b);
+ if(width==8){put8(src,a);put8(dst,sum);}
+ else if(width==16){put16(src,a);put16(dst,sum);}
+ else{put(src,a);put(dst,sum);}
+ return !fault;
+}
 static int step16(unsigned op,unsigned fs){unsigned m,g;uint32_t a,b,v;Operand o;
  if(op>=0xb8&&op<=0xbf){put16((Operand){1,op&7,0},imm16());return !fault;}
  if(op>=0x50&&op<=0x57){v=r[op-0x50]&65535;r[4]=gs(r[4],2);put16((Operand){0,0,r[4]},v);return !fault;}
  if(op>=0x58&&op<=0x5f){v=get16((Operand){0,0,r[4]});r[4]=ga(r[4],2);put16((Operand){1,op-0x58,0},v);return !fault;}
  if(op==0x68||op==0x6a){v=op==0x68?imm16():(uint32_t)(int32_t)(int8_t)byte();r[4]=gs(r[4],2);put16((Operand){0,0,r[4]},v);return !fault;}
  if(op>=0x40&&op<=0x4f){unsigned old=cflag;o=(Operand){1,op&7,0};v=alu16(op<0x48?0:5,get16(o),1);put16(o,v);cflag=old;return !fault;}
+ if(op==0x0f){m=byte();if(m==0xc0||m==0xc1)return xadd(m,fs,1,0);return 0;}
  if(op==0x98){put16((Operand){1,0,0},(uint16_t)(int16_t)(int8_t)r[0]);return 1;}
  if(op==0x99){put16((Operand){1,2,0},r[0]&0x8000?65535:0);return 1;}
  if(op==0xc1||op==0xd1||op==0xd3){m=byte();g=m>>3&7;o=decode(m,fs);b=op==0xc1?byte():op==0xd1?1:r[1];v=shift_group(g,get16(o),b,16);put16(o,v);return !fault;}
@@ -1150,8 +1166,11 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  }
  if(repeat==0xf3&&op==0x90&&!os16&&!fs)goto completed;
  if(repeat)goto unsupported;
- if(op==0xf0&&!os16&&!fs){
-  unsigned locked=byte(),mm=byte(),group=mm>>3&7;Operand dst=decode(mm,0);
+ if(op==0xf0){
+  unsigned locked=byte();
+  if(locked==0x0f){unsigned ext=byte();if((ext==0xc0||ext==0xc1)&&xadd(ext,fs,os16,1))goto completed;goto unsupported;}
+  if(os16||fs)goto unsupported;
+  unsigned mm=byte(),group=mm>>3&7;Operand dst=decode(mm,0);
   if(fault||dst.reg||(locked!=0xfe&&locked!=0xff)||group>1)goto unsupported;
   unsigned old=cflag;
   if(locked==0xfe)put8(dst,alu8(group?5:0,get8(dst),1));
@@ -1203,7 +1222,7 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  case 0xf6:m=byte();g=m>>3&7;o=decode(m,fs);a=get8(o);if(g==0){b=byte();(void)alu8(4,a,b);}else if(g==2)put8(o,~a);else if(g==3)put8(o,alu8(5,0,a));else goto unsupported;break;
  case 0x88:case 0x8a:m=byte();g=m>>3&7;o=decode(m,fs);if(op==0x88)put8(o,get8((Operand){1,g,0}));else put8((Operand){1,g,0},get8(o));break;
  case 0xc6:m=byte();if((m>>3&7)!=0)goto unsupported;o=decode(m,fs);v=byte();put8(o,v);break;
- case 0x0f:m=byte();if(m==0x31){uint64_t ticks=guest_ticks();r[0]=(uint32_t)ticks;r[2]=(uint32_t)(ticks>>32);}else if(m>=0x80&&m<=0x8f){v=imm();if(condition(m&15))ip=ga(ip,v);}else if(m==0xb6||m==0xbe||m==0xb7||m==0xbf){unsigned mm=byte();o=decode(mm,fs);v=(m&1)?get16(o):get8(o);r[mm>>3&7]=m==0xbe?(uint32_t)(int32_t)(int8_t)v:m==0xbf?(uint32_t)(int32_t)(int16_t)v:v;}else if(m>=0x90&&m<=0x9f){o=decode(byte(),fs);put8(o,condition(m&15));}else if(m==0xaf){unsigned mm=byte();o=decode(mm,fs);g=mm>>3&7;int64_t product=(int64_t)(int32_t)r[g]*(int32_t)get(o);r[g]=(uint32_t)product;cflag=oflag=product!=(int64_t)(int32_t)r[g];}else if(m==0xa3||m==0xab||m==0xb3||m==0xbb||m==0xba){unsigned mm=byte(),kind=mm>>3&7;o=decode(mm,fs);int32_t index;if(m==0xba){if(kind<4)goto unsupported;index=(int32_t)byte();}else{index=(int32_t)r[kind];kind=m==0xa3?4:m==0xab?5:m==0xb3?6:7;if(!o.reg){int32_t word=index>=0?index/32:(int32_t)(((int64_t)index-31)/32);o.addr=ga(o.addr,(uint32_t)word*4);}}unsigned bit=(uint32_t)index&31;uint32_t mask=UINT32_C(1)<<bit;v=get(o);cflag=(v>>bit)&1;if(kind==5)put(o,v|mask);else if(kind==6)put(o,v&~mask);else if(kind==7)put(o,gx(v,mask));}else if(m==0xbc||m==0xbd){unsigned mm=byte();o=decode(mm,fs);v=get(o);zflag=!v;if(v){unsigned bit=0;if(m==0xbc){while(!(v&(UINT32_C(1)<<bit)))bit++;}else{bit=31;while(!(v&(UINT32_C(1)<<bit)))bit--;}r[mm>>3&7]=bit;}}else if(m==0xa2){uint32_t leaf=r[0];if(leaf==0){r[0]=1;r[3]=0x756e6547;r[2]=0x49656e69;r[1]=0x6c65746e;}else if(leaf==1){r[0]=0x00000600;r[3]=0;r[1]=0;r[2]=0x11;}else{r[0]=r[1]=r[2]=r[3]=0;}}else if(m>=0xc8&&m<=0xcf){g=m&7;v=r[g];r[g]=(v>>24)|((v>>8)&0xff00)|((v<<8)&0xff0000)|(v<<24);}else if(m>=0x40&&m<=0x4f){unsigned mm=byte();o=decode(mm,fs);v=get(o);if(condition(m&15))r[mm>>3&7]=v;}else{report("Unsupported 0f extension %02x\n",m);goto unsupported;}break;
+ case 0x0f:m=byte();if(m==0xc0||m==0xc1){if(!xadd(m,fs,0,0))goto unsupported;}else if(m==0x31){uint64_t ticks=guest_ticks();r[0]=(uint32_t)ticks;r[2]=(uint32_t)(ticks>>32);}else if(m>=0x80&&m<=0x8f){v=imm();if(condition(m&15))ip=ga(ip,v);}else if(m==0xb6||m==0xbe||m==0xb7||m==0xbf){unsigned mm=byte();o=decode(mm,fs);v=(m&1)?get16(o):get8(o);r[mm>>3&7]=m==0xbe?(uint32_t)(int32_t)(int8_t)v:m==0xbf?(uint32_t)(int32_t)(int16_t)v:v;}else if(m>=0x90&&m<=0x9f){o=decode(byte(),fs);put8(o,condition(m&15));}else if(m==0xaf){unsigned mm=byte();o=decode(mm,fs);g=mm>>3&7;int64_t product=(int64_t)(int32_t)r[g]*(int32_t)get(o);r[g]=(uint32_t)product;cflag=oflag=product!=(int64_t)(int32_t)r[g];}else if(m==0xa3||m==0xab||m==0xb3||m==0xbb||m==0xba){unsigned mm=byte(),kind=mm>>3&7;o=decode(mm,fs);int32_t index;if(m==0xba){if(kind<4)goto unsupported;index=(int32_t)byte();}else{index=(int32_t)r[kind];kind=m==0xa3?4:m==0xab?5:m==0xb3?6:7;if(!o.reg){int32_t word=index>=0?index/32:(int32_t)(((int64_t)index-31)/32);o.addr=ga(o.addr,(uint32_t)word*4);}}unsigned bit=(uint32_t)index&31;uint32_t mask=UINT32_C(1)<<bit;v=get(o);cflag=(v>>bit)&1;if(kind==5)put(o,v|mask);else if(kind==6)put(o,v&~mask);else if(kind==7)put(o,gx(v,mask));}else if(m==0xbc||m==0xbd){unsigned mm=byte();o=decode(mm,fs);v=get(o);zflag=!v;if(v){unsigned bit=0;if(m==0xbc){while(!(v&(UINT32_C(1)<<bit)))bit++;}else{bit=31;while(!(v&(UINT32_C(1)<<bit)))bit--;}r[mm>>3&7]=bit;}}else if(m==0xa2){uint32_t leaf=r[0];if(leaf==0){r[0]=1;r[3]=0x756e6547;r[2]=0x49656e69;r[1]=0x6c65746e;}else if(leaf==1){r[0]=0x00000600;r[3]=0;r[1]=0;r[2]=0x11;}else{r[0]=r[1]=r[2]=r[3]=0;}}else if(m>=0xc8&&m<=0xcf){g=m&7;v=r[g];r[g]=(v>>24)|((v>>8)&0xff00)|((v<<8)&0xff0000)|(v<<24);}else if(m>=0x40&&m<=0x4f){unsigned mm=byte();o=decode(mm,fs);v=get(o);if(condition(m&15))r[mm>>3&7]=v;}else{report("Unsupported 0f extension %02x\n",m);goto unsupported;}break;
  case 0x98:r[0]=(uint32_t)(int32_t)(int16_t)r[0];break;
  case 0x99:if(fs)goto unsupported;r[2]=(r[0]&0x80000000u)?UINT32_MAX:0;break;
  case 0xf7:m=byte();g=m>>3&7;o=decode(m,fs);a=get(o);if(fault)break;
@@ -1225,12 +1244,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R47 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R48 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R47.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R48.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
