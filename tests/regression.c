@@ -29,6 +29,22 @@ static void instruction_fixture(void) {
  assert(ip==base+size&&!fault&&steps==9);
  free(image);free(stack);image=stack=NULL;size=0;
 }
+static void tsc_fixture(void){
+ static const uint8_t program[]={0x0f,0x31,0x0f,0x31,0x0f,0xa2};
+ base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);memcpy(image,program,sizeof program);
+ fault=0;ip=base;memset(r,0,sizeof r);r[4]=BASESTACK+STACKSIZE-64;
+ steps=429496729u;cflag=zflag=sflag=oflag=pflag=aflag=dflag=1;
+ assert(step()&&r[0]==4294967290u&&r[2]==0);
+ assert(step()&&r[0]==4&&r[2]==1);
+ assert(cflag&&zflag&&sflag&&oflag&&pflag&&aflag&&dflag);
+ r[0]=1;assert(step()&&(r[2]&16));
+ import_count=api_calls=0;uint32_t sp=r[4];write32(sp,base+64);
+ assert(api_call(kernel_export("QueryPerformanceCounter"),1)==1&&r[0]==1);
+ assert(((uint64_t)read32(base+68)<<32|read32(base+64))==guest_ticks());
+ r[4]=sp;write32(sp,base+64);
+ assert(api_call(kernel_export("QueryPerformanceFrequency"),1)==1&&read32(base+64)==1000000&&read32(base+68)==0);
+ free(image);free(stack);image=stack=NULL;size=0;steps=0;
+}
 static void dynamic_import_fixture(void){
  base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);
  fault=0;import_count=api_calls=last_error=0;kernel_refs=1;
@@ -436,4 +452,4 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
 }
-int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
+int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();tsc_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
