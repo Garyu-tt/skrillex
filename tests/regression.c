@@ -117,4 +117,34 @@ static void file_fixture(void){
  assert(kernel_fixture_call("CreateFileA",(uint32_t[]){base,0x80000000,1,0,3,0,0},7)==UINT32_MAX&&last_error==2);
  close_guest_files();free(image);free(stack);image=stack=NULL;size=0;
 }
-int main(void){assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();file_fixture();puts("Synthetic x86, dynamic imports, virtual window and file fixtures: PASS");return 0;}
+static uint32_t d3d_fixture_call(uint32_t token,const uint32_t*args,unsigned n){
+ uint32_t sp=BASESTACK+STACKSIZE-256;r[4]=sp;for(unsigned i=0;i<n;i++)write32(sp+4*i,args[i]);
+ assert(token&&api_call(token,1)==1&&!fault&&r[4]==sp+4*n);return r[0];
+}
+static uint32_t com_token(uint32_t obj,unsigned slot){return read32(read32(obj)+4*slot);}
+static void d3d_fixture(void){
+ base=0x400000;size=1024;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);assert(image&&stack&&heap);
+ fault=0;import_count=api_calls=0;heapnext=4096;memset(r,0,sizeof r);memset(windows,0,sizeof windows);
+ windows[0]=(GuestWindow){0x20001,base,0,0,4,3,1};
+ uint32_t create=d3d_token("Direct3DCreate9");
+ assert(!d3d_fixture_call(create,(uint32_t[]){31},1));
+ uint32_t root=d3d_fixture_call(create,(uint32_t[]){32},1);assert(root&&d3d_root.refs==1);
+ assert(d3d_fixture_call(com_token(root,4),(uint32_t[]){root},1)==1);
+ uint32_t pp=base+0x100,out=base+0x180;
+ write32(pp,4);write32(pp+4,3);write32(pp+8,22);write32(pp+12,1);write32(pp+24,1);write32(pp+28,0x20001);write32(pp+32,1);
+ assert(d3d_fixture_call(com_token(root,16),(uint32_t[]){root,0,1,0x20001,0x20,pp,out},7)==0);
+ uint32_t dev=read32(out);assert(dev&&color_buffer&&d3d_width==4&&d3d_height==3&&d3d_root.refs==2);
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff123456,0x3f800000,0},7)==0);
+ for(unsigned i=0;i<12;i++)assert(color_buffer[i]==0xff123456);
+ assert(d3d_fixture_call(com_token(dev,17),(uint32_t[]){dev,0,0,0,0},5)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,17),(uint32_t[]){dev,0,0,0,0},5)==0&&d3d_frames==1);
+ assert(d3d_hash==0x91193335u);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,2,0,0,0},7)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
+ assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!d3d_root.refs);
+ d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
+}
+int main(void){assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
