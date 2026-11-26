@@ -160,8 +160,31 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,17),(uint32_t[]){dev,0,0,0,0},5)==0&&d3d_frames==2&&d3d_hash==0x3d35d94du);
 
  assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,2,0,0,0},7)==D3D_INVALID);
+ /* Recreate with a D16 buffer, then render overlapping near/far triangles. */
+ assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer);
+ write32(pp+36,1);write32(pp+40,80);
+ assert(d3d_fixture_call(com_token(root,16),(uint32_t[]){root,0,1,0x20001,0x20,pp,out},7)==0);
+ dev=read32(out);assert(depth_buffer&&depth_enable&&depth_write&&depth_func==4);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,3,0xff000000,0x3f800000,0},7)==0);
+ assert(d3d_fixture_call(com_token(dev,89),(uint32_t[]){dev,0x44},2)==0);
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==0);
+ for(unsigned i=0;i<3;i++){write32(vertices+20*i+8,0x3e800000);write32(vertices+20*i+16,0xff0000ff);}
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,20},5)==0);
+ assert(color_buffer[0]==0xff0000ff&&depth_buffer[0]==16384);
+ for(unsigned i=0;i<3;i++){write32(vertices+20*i+8,0x3f400000);write32(vertices+20*i+16,0xffff0000);}
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,20},5)==0);
+ assert(color_buffer[0]==0xff0000ff&&depth_buffer[0]==16384);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,23,5},3)==0);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,14,0},3)==0);
+ assert(d3d_fixture_call(com_token(dev,58),(uint32_t[]){dev,23,base+0x190},3)==0&&read32(base+0x190)==5);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,20},5)==0);
+ assert(color_buffer[0]==0xffff0000&&depth_buffer[0]==16384);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,23,9},3)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,2,0,0x3f000000,0},7)==0);
+ assert(depth_buffer[0]==32768&&color_buffer[0]==0xffff0000);
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
- assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!d3d_root.refs);
+ assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
 }
 int main(void){assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
