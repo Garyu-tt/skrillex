@@ -427,10 +427,51 @@ static GuestTexture textures[TEX_MAX];static GuestTexture* texture0;
 static unsigned tex_address_u=1,tex_address_v=1,tex_min=1,tex_mag=1;
 /* D3D uses row-vector matrices: position * world * view * projection. */
 static float transforms[3][16];
+#define LIGHT_MAX 8u
+/* D3DMATERIAL9 and directional D3DLIGHT9 in their guest wire layout. */
+typedef struct{float diffuse[4],ambient[4],specular[4],emissive[4],power;} GuestMaterial;
+typedef struct{uint32_t type;float diffuse[4],specular[4],ambient[4],position[3],direction[3],range,falloff,attenuation[3],theta,phi;} GuestLight;
+_Static_assert(sizeof(GuestMaterial)==68,"D3DMATERIAL9 layout");
+_Static_assert(sizeof(GuestLight)==104,"D3DLIGHT9 layout");
+static GuestMaterial material;
+static GuestLight lights[LIGHT_MAX];
+static unsigned light_defined[LIGHT_MAX],light_enabled[LIGHT_MAX],lighting,ambient_light,normalize_normals;
+static void lighting_reset(void){
+ memset(&material,0,sizeof material);memset(lights,0,sizeof lights);memset(light_defined,0,sizeof light_defined);memset(light_enabled,0,sizeof light_enabled);
+ for(unsigned i=0;i<4;i++)material.diffuse[i]=material.ambient[i]=1;
+ lighting=0;ambient_light=0;normalize_normals=1;
+}
+static int unit3(double*v){
+ double n=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];if(!(n>1e-24&&n<1e24))return 0;
+ /* Newton square root, bounded input; no host libm dependency. */
+ double q=n>=1?n:1;for(unsigned i=0;i<100;i++)q=(q+n/q)*0.5;
+ for(unsigned i=0;i<3;i++)v[i]/=q;
+ return 1;
+}
+static int normal_world(const float*n,double*out){
+ const float*m=transforms[0];double a=m[0],b=m[1],c=m[2],d=m[4],e=m[5],f=m[6],g=m[8],h=m[9],i=m[10];
+ double cof[9]={e*i-f*h,f*g-d*i,d*h-e*g,c*h-b*i,a*i-c*g,b*g-a*h,b*f-c*e,c*d-a*f,a*e-b*d};
+ double det=a*cof[0]+b*cof[1]+c*cof[2];
+ if(!(det>1e-12||det<-1e-12))return 0;
+ for(unsigned j=0;j<3;j++){out[j]=0;for(unsigned k=0;k<3;k++)out[j]+=n[k]*cof[k*3+j]/det;if(!(out[j]>=-1e12&&out[j]<=1e12))return 0;}
+ return !normalize_normals||unit3(out);
+}
+static int valid_rgba(const float*c){for(unsigned k=0;k<4;k++)if(!(c[k]>=0&&c[k]<=1))return 0;return 1;}
+static int light_vertex(const float*n,double*out){
+ double normal[3];if(!normal_world(n,normal))return 0;
+ for(unsigned k=0;k<3;k++){unsigned channel=2-k;double c=material.emissive[k]+material.ambient[k]*((ambient_light>>(channel*8))&255)/255.0;
+  for(unsigned j=0;j<LIGHT_MAX;j++)if(light_enabled[j]){
+   GuestLight*l=&lights[j];double dir[3]={l->direction[0],l->direction[1],l->direction[2]};if(!unit3(dir))return 0;
+   double dot=-(normal[0]*dir[0]+normal[1]*dir[1]+normal[2]*dir[2]);if(dot<0)dot=0;
+   c+=material.ambient[k]*l->ambient[k]+material.diffuse[k]*l->diffuse[k]*dot;
+  }
+  out[channel]=(c>1?1:c<0?0:c)*255;
+ }out[3]=material.diffuse[3]*255;return 1;
+}
 typedef struct{uint32_t x,y,w,h;float minz,maxz;} GuestViewport;
 static GuestViewport viewport;
-static unsigned vertex_bytes(void){switch(d3d_fvf){case 0x42:return 16;case 0x142:return 24;case 0x44:return 20;case 0x144:return 28;default:return 0;}}
-static int fvf_valid(unsigned f){return f==0x42||f==0x142||f==0x44||f==0x144;}
+static unsigned vertex_bytes(void){switch(d3d_fvf){case 0x42:return 16;case 0x142:return 24;case 0x44:return 20;case 0x144:return 28;case 0x12:return 24;case 0x112:return 32;default:return 0;}}
+static int fvf_valid(unsigned f){return f==0x42||f==0x142||f==0x44||f==0x144||f==0x12||f==0x112;}
 static void transform_reset(void){
  memset(transforms,0,sizeof transforms);
  for(unsigned m=0;m<3;m++)for(unsigned i=0;i<4;i++)transforms[m][i*5]=1;
@@ -511,9 +552,13 @@ static int pipeline_vertex(const uint8_t*p,PipelineVertex*out){
   memcpy(&w,p+12,4);out->p[0]=x;out->p[1]=y;out->p[2]=z;out->p[3]=w;
   if(!(x>=-8192&&x<=8192&&y>=-8192&&y<=8192&&z>=0&&z<=1&&w>=1.0/4096&&w<=4096))return 0;
  }else if(!transform_clip(x,y,z,out->p))return 0;
- uint32_t c=le32(p+off);for(unsigned k=0;k<4;k++)out->color[k]=(c>>(k*8))&255;
+ if(d3d_fvf&0x10){
+  float n[3];memcpy(n,p+12,12);for(unsigned k=0;k<3;k++)if(!(n[k]>=-4096&&n[k]<=4096))return 0;
+  if(lighting){if(!light_vertex(n,out->color))return 0;}else for(unsigned k=0;k<4;k++)out->color[k]=255;
+  off=24;
+ }else{if(lighting&&!pre)return 0;uint32_t c=le32(p+off);for(unsigned k=0;k<4;k++)out->color[k]=(c>>(k*8))&255;off+=4;}
  out->u=out->v=0;
- if(d3d_fvf&0x100){float u,t;memcpy(&u,p+off+4,4);memcpy(&t,p+off+8,4);
+ if(d3d_fvf&0x100){float u,t;memcpy(&u,p+off,4);memcpy(&t,p+off+4,4);
   if(!(u>=-8&&u<=8&&t>=-8&&t<=8))return 0;
   out->u=u;out->v=t;}
  return 1;
@@ -725,7 +770,7 @@ static int texture_call(const char*n,unsigned*argc,uint32_t*ret){
 }
 static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  static const char*const root_methods[17]={[1]="RootAddRef",[2]="RootRelease",[4]="GetAdapterCount",[16]="CreateDevice"};
- static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[23]="CreateTexture",[26]="CreateVertexBuffer",[27]="CreateIndexBuffer",[41]="BeginScene",[42]="EndScene",[43]="Clear",[44]="SetTransform",[45]="GetTransform",[47]="SetViewport",[48]="GetViewport",[57]="SetRenderState",[58]="GetRenderState",[64]="GetTexture",[65]="SetTexture",[68]="GetSamplerState",[69]="SetSamplerState",[81]="DrawPrimitive",[82]="DrawIndexedPrimitive",[83]="DrawPrimitiveUP",[89]="SetFVF",[90]="GetFVF",[100]="SetStreamSource",[101]="GetStreamSource",[104]="SetIndices",[105]="GetIndices"};
+ static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[23]="CreateTexture",[26]="CreateVertexBuffer",[27]="CreateIndexBuffer",[41]="BeginScene",[42]="EndScene",[43]="Clear",[44]="SetTransform",[45]="GetTransform",[47]="SetViewport",[48]="GetViewport",[49]="SetMaterial",[50]="GetMaterial",[51]="SetLight",[52]="GetLight",[53]="LightEnable",[54]="GetLightEnable",[57]="SetRenderState",[58]="GetRenderState",[64]="GetTexture",[65]="SetTexture",[68]="GetSamplerState",[69]="SetSamplerState",[81]="DrawPrimitive",[82]="DrawIndexedPrimitive",[83]="DrawPrimitiveUP",[89]="SetFVF",[90]="GetFVF",[100]="SetStreamSource",[101]="GetStreamSource",[104]="SetIndices",[105]="GetIndices"};
  if(!strcmp(n,"Direct3DCreate9")){
   *argc=1;if(arg(0)!=32)return 1;
   if(d3d_root.refs){if(d3d_root.refs==UINT32_MAX)return 0;d3d_root.refs++;*ret=d3d_root.obj;return 1;}
@@ -760,7 +805,7 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
   uint16_t*zbuf=NULL;
   if(depth){zbuf=malloc((size_t)w*h*sizeof *zbuf);if(!zbuf){free(buf);*ret=D3D_OUTOFMEMORY;return 1;}for(size_t i=0;i<(size_t)w*h;i++)zbuf[i]=65535;}
   if(!d3d_object(&d3d_device,119,device_methods)){free(zbuf);free(buf);*ret=D3D_OUTOFMEMORY;return !fault;}
-  color_buffer=buf;depth_buffer=zbuf;depth_enable=depth!=0;depth_write=1;depth_func=4;d3d_width=w;d3d_height=h;d3d_scene=0;d3d_fvf=0;transform_reset();blend_reset();tex_address_u=tex_address_v=tex_min=tex_mag=1;d3d_root.refs++;
+  color_buffer=buf;depth_buffer=zbuf;depth_enable=depth!=0;depth_write=1;depth_func=4;d3d_width=w;d3d_height=h;d3d_scene=0;d3d_fvf=0;transform_reset();blend_reset();lighting_reset();tex_address_u=tex_address_v=tex_min=tex_mag=1;d3d_root.refs++;
   write32(pp,w);write32(pp+4,h);write32(pp+8,fmt?fmt:22);write32(pp+12,1);write32(out,d3d_device.obj);
   *ret=0;report("D3D9 CPU reference device: %ux%u\n",w,h);return 1;
  }
@@ -883,8 +928,27 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
    viewport=v;}
   *ret=0;return !fault;
  }
+ if(!strcmp(n,"SetMaterial")||!strcmp(n,"GetMaterial")){
+  *argc=2;uint8_t*p=ptr(arg(1),68);if(!p)return 0;
+  if(!strcmp(n,"GetMaterial"))memcpy(p,&material,68);
+  else{GuestMaterial m;memcpy(&m,p,68);if(!valid_rgba(m.diffuse)||!valid_rgba(m.ambient)||!valid_rgba(m.specular)||!valid_rgba(m.emissive)||!(m.power>=0&&m.power<=128))return 1;material=m;}
+  *ret=0;return 1;
+ }
+ if(!strcmp(n,"SetLight")||!strcmp(n,"GetLight")){
+  *argc=3;unsigned index=arg(1);if(index>=LIGHT_MAX)return 1;uint8_t*p=ptr(arg(2),104);if(!p)return 0;
+  if(!strcmp(n,"GetLight")){if(!light_defined[index])return 1;memcpy(p,&lights[index],104);}
+  else{GuestLight l;memcpy(&l,p,104);double dir[3]={l.direction[0],l.direction[1],l.direction[2]};
+   if(l.type!=3||!valid_rgba(l.diffuse)||!valid_rgba(l.specular)||!valid_rgba(l.ambient)||!unit3(dir))return 1;
+   lights[index]=l;light_defined[index]=1;}
+  *ret=0;return 1;
+ }
+ if(!strcmp(n,"LightEnable")||!strcmp(n,"GetLightEnable")){
+  *argc=3;unsigned index=arg(1),v=arg(2);if(index>=LIGHT_MAX||!light_defined[index])return 1;
+  if(!strcmp(n,"GetLightEnable")){write32(v,light_enabled[index]?128:0);*ret=0;return !fault;}
+  light_enabled[index]=v!=0;*ret=0;return 1;
+ }
  if(!strcmp(n,"SetRenderState")||!strcmp(n,"GetRenderState")){
-  *argc=3;unsigned state=arg(1),v=arg(2);unsigned*slot=state==7?&depth_enable:state==14?&depth_write:state==23?&depth_func:state==15?&alpha_test:state==19?&blend_src:state==20?&blend_dst:state==24?&alpha_ref:state==25?&alpha_func:state==27?&alpha_blend:state==168?&color_mask:state==171?&blend_op:NULL;
+  *argc=3;unsigned state=arg(1),v=arg(2);unsigned*slot=state==7?&depth_enable:state==14?&depth_write:state==23?&depth_func:state==15?&alpha_test:state==19?&blend_src:state==20?&blend_dst:state==24?&alpha_ref:state==25?&alpha_func:state==27?&alpha_blend:state==168?&color_mask:state==171?&blend_op:state==137?&lighting:state==139?&ambient_light:state==143?&normalize_normals:NULL;
   if(!slot)return 1;
   if(!strcmp(n,"GetRenderState")){write32(v,*slot);*ret=0;return !fault;}
   if(state==23||state==25){if(v<1||v>8)return 1;}
@@ -892,7 +956,7 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
   else if(state==24){if(v>255)return 1;}
   else if(state==168){if(v>15)return 1;}
   else if(state==171){if(v<1||v>5)return 1;}
-  else if(v>1)return 1;
+  else if(state!=139&&v>1)return 1;
   if(state==7&&v&&!depth_buffer)return 1;
   *slot=v;*ret=0;return 1;
  }
@@ -1159,12 +1223,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R45 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R46 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R45.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R46.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
