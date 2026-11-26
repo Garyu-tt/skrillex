@@ -29,4 +29,24 @@ static void instruction_fixture(void) {
  assert(ip==base+size&&!fault&&steps==9);
  free(image);free(stack);image=stack=NULL;size=0;
 }
-int main(void){assert(test());instruction_fixture();puts("Synthetic x86 instruction fixture: PASS (9 instructions)");return 0;}
+static void dynamic_import_fixture(void){
+ base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);
+ fault=0;import_count=api_calls=last_error=0;kernel_refs=1;
+ uint32_t sp=BASESTACK+STACKSIZE-64;r[4]=sp;
+ memcpy(image,"KERNEL32.DLL",13);memcpy(image+32,"GetTickCount",13);memcpy(image+64,"UnknownExport",14);
+ uint32_t load=kernel_export("LoadLibraryA"),proc=kernel_export("GetProcAddress"),release=kernel_export("FreeLibrary");
+ assert(load&&proc&&release&&load!=proc);
+ write32(sp,base);assert(api_call(load,1)==1&&r[0]==KERNEL32_HANDLE&&kernel_refs==2&&r[4]==sp+4);
+ r[4]=sp;write32(sp,KERNEL32_HANDLE);write32(sp+4,base+32);
+ assert(api_call(proc,1)==1&&r[0]==kernel_export("GetTickCount")&&r[4]==sp+8);
+ uint32_t tick=r[0];unsigned count=import_count;assert(kernel_export("GetTickCount")==tick&&import_count==count);
+ assert(!kernel_export("gettickcount"));
+ r[4]=sp;write32(sp,KERNEL32_HANDLE);write32(sp+4,base+64);
+ assert(api_call(proc,1)==1&&!r[0]&&last_error==127&&import_count==count);
+ r[4]=sp;write32(sp,base+64);
+ assert(api_call(load,1)==1&&!r[0]&&last_error==126);
+ r[4]=sp;write32(sp,0x400123);write32(sp+4,KERNEL32_HANDLE);
+ assert(api_call(release,0)==1&&r[0]==1&&kernel_refs==1&&ip==0x400123&&r[4]==sp+8);
+ free(image);free(stack);image=stack=NULL;size=0;
+}
+int main(void){assert(test());dynamic_import_fixture();instruction_fixture();puts("Synthetic x86 instruction and dynamic import fixtures: PASS");return 0;}
