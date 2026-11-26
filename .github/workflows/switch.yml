@@ -1,11 +1,24 @@
-name: Skrillex R20 Switch build
+name: Skrillex R30 Switch build
 on:
   push:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
+  host-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile and run built-in regressions
+        run: |
+          cc -std=c11 -O2 -Wall -Wextra -Werror source/main.c -o skrillex-host
+          ./skrillex-host
+      - name: Sanitizer regression
+        run: |
+          cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all source/main.c -o skrillex-sanitize
+          ./skrillex-sanitize
   build:
+    needs: host-regression
     runs-on: ubuntu-latest
     container: devkitpro/devkita64:latest
     steps:
@@ -17,15 +30,15 @@ jobs:
           export DEVKITPRO=/opt/devkitpro
           export DEVKITA64="$DEVKITPRO/devkitA64"
           export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
-          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o Skrillex-R20.elf
-          nacptool --create Skrillex InfraCare 0.20.0 Skrillex-R20.nacp
-          elf2nro Skrillex-R20.elf Skrillex-R20.nro --nacp=Skrillex-R20.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
-          test "$(dd if=Skrillex-R20.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
-          sha256sum Skrillex-R20.nro > SHA256SUMS
+          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o Skrillex-R30.elf
+          nacptool --create Skrillex InfraCare 0.30.0 Skrillex-R30.nacp
+          elf2nro Skrillex-R30.elf Skrillex-R30.nro --nacp=Skrillex-R30.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
+          test "$(dd if=Skrillex-R30.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
+          sha256sum Skrillex-R30.nro > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: Skrillex-R20-Switch
+          name: Skrillex-R30-Switch
           path: |
-            Skrillex-R20.nro
+            Skrillex-R30.nro
             SHA256SUMS
           if-no-files-found: error
