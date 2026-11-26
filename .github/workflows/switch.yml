@@ -1,6 +1,9 @@
 name: Skrillex R46 Switch build
 on:
   push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
@@ -17,9 +20,9 @@ jobs:
           ./skrillex-regression
       - name: Sanitizer regression
         run: |
-          cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all source/main.c -o skrillex-sanitize
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all source/main.c -o skrillex-sanitize
           ./skrillex-sanitize
-          cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all tests/regression.c -o skrillex-regression-sanitize
+          cc -std=c11 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all tests/regression.c -o skrillex-regression-sanitize
           ./skrillex-regression-sanitize
   build:
     needs: host-regression
