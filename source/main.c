@@ -154,7 +154,7 @@ static uint32_t user_export(const char*name){
  if(!canonical)return 0;
  for(unsigned i=0;i<import_count;i++)if(eqi(imports[i].dll,"user32.dll")&&imports[i].name&&!strcmp(imports[i].name,canonical))return APITOKEN+4*i;
  if(import_count>=MAXIMPORT)return 0;
- unsigned i=import_count++;imports[i]=(Import){"USER34.dll",canonical,0};return APITOKEN+4*i;
+ unsigned i=import_count++;imports[i]=(Import){"USER32.dll",canonical,0};return APITOKEN+4*i;
 }
 #define D3D9_HANDLE 0x7ff90000u
 static unsigned d3d_refs=1;
