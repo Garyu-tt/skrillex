@@ -6,7 +6,7 @@ Goal: implement user-mode IA-32 semantics on ARM64 first, then Intel64. Proton/W
 |---|---|---|
 | Integer ALU | Partial: ADD/ADC/SUB/SBB/CMP/AND/OR/XOR/TEST/INC/DEC/NEG/NOT | Audit encodings, defined flags, faults, widths |
 | Data transfer | Partial MOV/MOVZX/MOVSX/LEA/XCHG/BSWAP | Segment forms, 16-bit variants, address-size prefix, POP r/m, far forms |
-| Multiply/divide | Partial 32-bit MUL/IMUL/DIV/IDIV | 8/16-bit forms and exception contract |
+| Multiply/divide | 8/16/32-bit MUL/IMUL/DIV/IDIV candidate R50 | Architectural exception delivery, complete operand/prefix audit |
 | Shifts/rotates | Partial 8/16/32-bit group 2 | SHLD/SHRD, defined flags audit |
 | Bit manipulation | Partial BT/BTS/BTR/BTC/BSF/BSR | 16-bit forms, memory offsets, LOCK legality |
 | Atomic RMW | XADD partial in R48; CMPXCHG candidate R49 | CMPXCHG8B, other valid LOCK forms, memory model, thread scheduler |
@@ -31,4 +31,4 @@ Goal: implement user-mode IA-32 semantics on ARM64 first, then Intel64. Proton/W
 - Require strict C11 regression, ASan/UBSan, ARM64 NRO build and artifact publication on PR. Hardware tests are a separate gate.
 - Single-thread LOCK behavior is not a multiprocessor guarantee.
 - Use the existing graph ALU for scalar arithmetic where available; native floating point and integer multiply/divide are currently hybrid reference paths, not a fully neural executor.
-- Next batch: complete scalar multiply/divide widths, SHLD/SHRD, missing data-transfer forms; then audit prefix decoder and implement MMX/SSE register state.
+- Next batch: SHLD/SHRD, missing data-transfer forms; then audit prefix decoder and implement MMX/SSE register state.
