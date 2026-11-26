@@ -2,13 +2,13 @@
 
 Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed-title launcher. The game is not distributed with this repository.
 
-## R39
+## R40
 
 PE32 loader, guest memory, stack, TEB, isolated heap, import table with synthetic dispatch tokens, partial x86 integer interpreter and partial Win32 process services. Threshold graphs implement integer add/subtract/XOR; multiplication, division, and other operations still use native C arithmetic. Not a full neural implementation of Windows.
 
-Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R39.log`.
+Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R40.log`.
 
-Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R39 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
+Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R40 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
 
 Limitations: simulated XP-compatible process environment, single-thread critical sections and TLS, fixed 8 MiB guest heap, limited CP1252 and Latin case mapping/classification, no full file system, DLL loader, Direct3D, audio, or full x86 support. Host trace is not a proof of Windows semantic equivalence or game playability. Unknown functions stop execution.
 
@@ -31,3 +31,5 @@ R37 adds optional D16 auto-depth buffer, fixed-point depth interpolation, all ei
 R38 adds guest vertex buffer COM objects (32 live, up to 2 MiB each within the 8 MiB guest heap), Lock/Unlock, GetDesc, stream 0 binding, stream lookup and non-indexed DrawPrimitive. Only XYZRHW+diffuse and restricted usage/pool/lock flags; explicit unbind/release before final device release. Index buffers, textures, transform pipeline and Maxwell presentation remain unimplemented. Fixtures for R37–R38 have not yet been executed; last verified GTA trace remains R28.
 
 R39 adds guest INDEX16/INDEX32 buffers, Lock/Unlock/GetDesc, SetIndices/GetIndices, and DrawIndexedPrimitive for triangle lists/strips/fans. Validates the signed base vertex, declared index range, buffer bounds and all vertices before drawing; shared vertices remain in guest memory. Up to 32 live index buffers (2 MiB maximum each, subject to shared 8 MiB heap). This reference path expands the indexed draw into a temporary vertex array; not a GPU cache or measured speedup. Synthetic regression covers both formats, negative BaseVertexIndex and invalid ranges. Build and regression results remain unverified. Textures and native screen presentation remain absent.
+
+R40 adds single-level A8R8G8B8/X8R8G8B8 textures (32 live, up to 1024x1024 within the shared 8 MiB heap), CreateTexture/LockRect/UnlockRect, GetLevelDesc/GetLevelCount, stage-0 binding and sampler states. XYZRHW+DIFFUSE+TEX1 (0x144) vertices use affine fixed-point UV interpolation, point or bilinear sampling (matching min/mag filters), wrap or clamp and diffuse modulation. No mipmaps, compressed formats, perspective correction, other texture-stage operations or GPU presentation. Synthetic fixture includes a 2x2 texture and exact expected pixel colors. R40 is not yet compiled or executed; last verified GTA trace is still R28.
