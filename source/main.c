@@ -50,6 +50,7 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0;Operan
  else if(op>=0xb8&&op<=0xbf&&!fs)r[op-0xb8]=imm();
  else if(op>=0x70&&op<=0x7f){v=(uint32_t)(int32_t)(int8_t)byte();if(condition(op&15))ip=ga(ip,v);}
  else if(op>=0x40&&op<=0x4f){unsigned old=cflag;g=op&7;r[g]=alu(op<0x48?0:5,r[g],1);cflag=old;}
+ else if(op>=0x91&&op<=0x97&&!fs){g=op&7;v=r[0];r[0]=r[g];r[g]=v;}
  else if(op>=0xb0&&op<=0xb7){o=(Operand){1,op&7,0};put8(o,byte());}
  else switch(op){
  case 0x90:if(fs)goto unsupported;break;
@@ -63,6 +64,7 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0;Operan
  else if(op==0x85){(void)alu(4,get(o),r[g]);}
  else{unsigned group=(op>>3)&7;unsigned dest=op&2;if(dest){v=alu(group,r[g],get(o));if(group!=7)r[g]=v;}else{v=alu(group,get(o),r[g]);if(group!=7)put(o,v);}}
  break;
+ case 0x87:m=byte();g=m>>3&7;o=decode(m,fs);v=get(o);put(o,r[g]);r[g]=v;break;
  case 0xc7:m=byte();if((m>>3&7)!=0)goto unsupported;o=decode(m,fs);v=imm();put(o,v);break;
  case 0x81:case 0x83:m=byte();g=m>>3&7;o=decode(m,fs);b=op==0x81?imm():(uint32_t)(int32_t)(int8_t)byte();a=get(o);if(g==2||g==3)goto unsupported;v=alu(g,a,b);if(g!=7)put(o,v);break;
  case 0x05:case 0x0d:case 0x25:case 0x2d:case 0x35:case 0x3d:g=op>>3&7;v=imm();v=alu(g,r[0],v);if(g!=7)r[0]=v;break;
