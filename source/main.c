@@ -146,7 +146,7 @@ static uint32_t kernel_export(const char*name){
  if(import_count>=MAXIMPORT)return 0;
  unsigned i=import_count++;imports[i]=(Import){"KERNEL32.dll",canonical,0};return APITOKEN+4*i;
 }
-#define USER34_HANDLE 0x7ffa0000u
+#define USER32_HANDLE 0x7ffa0000u
 static unsigned user_refs=1;
 static const char*const user_exports[]={"RegisterClassA","RegisterClassExA","CreateWindowExA","DefWindowProcA","IsWindow","GetClientRect","GetWindowRect","PostMessageA","PeekMessageA","PostQuitMessage","TranslateMessage","DispatchMessageA"};
 static uint32_t user_export(const char*name){
@@ -155,6 +155,13 @@ static uint32_t user_export(const char*name){
  for(unsigned i=0;i<import_count;i++)if(eqi(imports[i].dll,"user32.dll")&&imports[i].name&&!strcmp(imports[i].name,canonical))return APITOKEN+4*i;
  if(import_count>=MAXIMPORT)return 0;
  unsigned i=import_count++;imports[i]=(Import){"USER34.dll",canonical,0};return APITOKEN+4*i;
+}
+#define D3D9_HANDLE 0x7ff90000u
+static unsigned d3d_refs=1;
+static uint32_t d3d_token(const char*name){
+ for(unsigned i=0;i<import_count;i++)if(eqi(imports[i].dll,"d3d9.dll")&&imports[i].name&&!strcmp(imports[i].name,name))return APITOKEN+4*i;
+ if(import_count>=MAXIMPORT)return 0;
+ unsigned i=import_count++;imports[i]=(Import){"d3d9.dll",name,0};return APITOKEN+4*i;
 }
 static unsigned api_arg_offset;
 static uint32_t arg(unsigned n){return read32(r[4]+api_arg_offset+4*n);}
@@ -354,9 +361,82 @@ static int file_seek(GuestFile*f,int64_t off,unsigned method,uint64_t*out){
  *out=target;return 1;
 }
 static void close_guest_files(void){for(unsigned i=0;i<FILE_MAX;i++)if(files[i].f){fclose(files[i].f);files[i].f=NULL;}}
+/* CPU reference framebuffer. COM objects and vtables live in guest memory. */
+#define D3D_INVALID 0x8876086cu
+#define D3D_NOTAVAILABLE 0x8876086au
+#define D3D_OUTOFMEMORY 0x8007000eu
+typedef struct{uint32_t obj,table,refs;} D3DObject;
+static D3DObject d3d_root,d3d_device;
+static uint32_t* color_buffer;
+static unsigned d3d_width,d3d_height,d3d_scene,d3d_frames;
+static uint32_t d3d_hash;
+static void d3d_cleanup(void){free(color_buffer);color_buffer=NULL;d3d_root=(D3DObject){0};d3d_device=(D3DObject){0};d3d_width=d3d_height=d3d_scene=0;}
+static int d3d_object(D3DObject*o,unsigned count,const char*const*names){
+ if(!heap)return 0;
+ uint32_t mem=alloc_guest(4+count*4);if(!mem)return 0;
+ uint32_t table=mem+4;write32(mem,table);
+ for(unsigned i=0;i<count;i++){uint32_t t=names[i]?d3d_token(names[i]):d3d_token("UnsupportedMethod");if(!t)return 0;write32(table+i*4,t);}
+ if(fault)return 0;
+ *o=(D3DObject){mem,table,1};return 1;
+}
+static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
+ static const char*const root_methods[17]={[1]="RootAddRef",[2]="RootRelease",[4]="GetAdapterCount",[16]="CreateDevice"};
+ static const char*const device_methods[119]={[1]="DeviceAddRef",[2]="DeviceRelease",[3]="TestCooperativeLevel",[17]="Present",[41]="BeginScene",[42]="EndScene",[43]="Clear"};
+ if(!strcmp(n,"Direct3DCreate9")){
+  *argc=1;if(arg(0)!=32)return 1;
+  if(d3d_root.refs){if(d3d_root.refs==UINT32_MAX)return 0;d3d_root.refs++;*ret=d3d_root.obj;return 1;}
+  if(!d3d_object(&d3d_root,17,root_methods))return !fault;
+  *ret=d3d_root.obj;return 1;
+ }
+ if(!strcmp(n,"UnsupportedMethod")){report("Unsupported D3D9 COM method\n");return 0;}
+ uint32_t self=arg(0);
+ if(!strcmp(n,"RootAddRef")||!strcmp(n,"RootRelease")||!strcmp(n,"DeviceAddRef")||!strcmp(n,"DeviceRelease")){
+  *argc=1;D3DObject*o=n[0]=='R'?&d3d_root:&d3d_device;
+  if(!o->refs||self!=o->obj)return 0;
+  if(strstr(n,"AddRef")){if(o->refs==UINT32_MAX)return 0;*ret=++o->refs;}
+  else{if(o==&d3d_root&&o->refs==1&&d3d_device.refs){report("D3D parent reference retained by device\n");return 0;}*ret=--o->refs;if(!o->refs&&o==&d3d_device){free(color_buffer);color_buffer=NULL;d3d_scene=0;if(d3d_root.refs)d3d_root.refs--;}}
+  return 1;
+ }
+ if(!strcmp(n,"GetAdapterCount")){*argc=1;if(self!=d3d_root.obj||!d3d_root.refs)return 0;*ret=1;return 1;}
+ if(!strcmp(n,"CreateDevice")){
+  *argc=7;*ret=D3D_INVALID;if(self!=d3d_root.obj||!d3d_root.refs)return 1;
+  uint32_t adapter=arg(1),type=arg(2),focus=arg(3),behavior=arg(4),pp=arg(5),out=arg(6);
+  uint8_t*p=ptr(pp,56);if(!p||!ptr(out,4))return 0;
+  write32(out,0);if(adapter||type!=1||d3d_device.refs||d3d_root.refs==UINT32_MAX)return 1;
+  unsigned w=le32(p),h=le32(p+4),fmt=le32(p+8),count=le32(p+12),ms=le32(p+16),swap=le32(p+24),hwnd=le32(p+28),windowed=le32(p+32),depth=le32(p+36);
+  GuestWindow*win=window_find(hwnd?hwnd:focus);
+  if(!win||!windowed||depth||ms||count>1||swap!=1||(fmt!=0&&fmt!=21&&fmt!=22)||(behavior!=0x20&&behavior!=0x40&&behavior!=0x80)){*ret=D3D_NOTAVAILABLE;return 1;}
+  if(!w)w=(unsigned)win->w;
+  if(!h)h=(unsigned)win->h;
+  if(!w||!h||w>1920||h>1080){*ret=D3D_NOTAVAILABLE;return 1;}
+  uint32_t*buf=calloc((size_t)w*h,sizeof *buf);if(!buf){*ret=D3D_OUTOFMEMORY;return 1;}
+  if(!d3d_object(&d3d_device,119,device_methods)){free(buf);*ret=D3D_OUTOFMEMORY;return !fault;}
+  color_buffer=buf;d3d_width=w;d3d_height=h;d3d_scene=0;d3d_root.refs++;
+  write32(pp,w);write32(pp+4,h);write32(pp+8,fmt?fmt:22);write32(pp+12,1);write32(out,d3d_device.obj);
+  *ret=0;report("D3D9 CPU reference device: %ux%u\n",w,h);return 1;
+ }
+ if(self!=d3d_device.obj||!d3d_device.refs||!color_buffer)return 0;
+ *ret=D3D_INVALID;
+ if(!strcmp(n,"TestCooperativeLevel")){*argc=1;*ret=0;return 1;}
+ if(!strcmp(n,"BeginScene")){*argc=1;if(!d3d_scene){d3d_scene=1;*ret=0;}return 1;}
+ if(!strcmp(n,"EndScene")){*argc=1;if(d3d_scene){d3d_scene=0;*ret=0;}return 1;}
+ if(!strcmp(n,"Clear")){
+  *argc=7;uint32_t count=arg(1),rect=arg(2),flags=arg(3),color=arg(4);
+  if(count||rect||flags!=1)return 1;
+  for(size_t i=0;i<(size_t)d3d_width*d3d_height;i++)color_buffer[i]=color;
+  *ret=0;return 1;
+ }
+ if(!strcmp(n,"Present")){
+  *argc=5;if(d3d_scene||arg(1)||arg(2)||arg(3)||arg(4))return 1;
+  uint32_t hash=2166136261u;for(size_t i=0;i<(size_t)d3d_width*d3d_height;i++){uint32_t v=color_buffer[i];for(unsigned k=0;k<4;k++){hash^=(v>>(k*8))&255;hash*=16777619u;}}
+  d3d_hash=hash;d3d_frames++;*ret=0;report("D3D9 reference frame %u hash=%08x (not displayed)\n",d3d_frames,hash);return 1;
+ }
+ return 0;
+}
 static int api_call(uint32_t target,unsigned iscall){
  if(target<APITOKEN||((target-APITOKEN)&3)||(target-APITOKEN)/4>=import_count)return -1;
  api_arg_offset=iscall?0:4;Import*x=&imports[(target-APITOKEN)/4];const char*n=x->name;unsigned argc=0;uint32_t ret=0,p,q,t;uint8_t*dst;
+ if(n&&eqi(x->dll,"d3d9.dll")){if(!d3d_call(n,&argc,&ret))goto missing;goto finish;}
  if(n&&eqi(x->dll,"user32.dll")){if(!user_call(n,&argc,&ret))goto missing;goto finish;}
  if(!eqi(x->dll,"kernel32.dll")||!n)goto missing;
  if(eqi(n,"GetVersionExA")||eqi(n,"GetVersionExW")){
@@ -382,12 +462,12 @@ static int api_call(uint32_t target,unsigned iscall){
   else if(guest_ascii(p,name,sizeof name,wide)){
    if(eqi(name,"kernel32")||eqi(name,"kernel32.dll")){
    if(load&&kernel_refs==UINT32_MAX){last_error=8;}else{if(load)kernel_refs++;ret=KERNEL32_HANDLE;}
-  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER34_HANDLE;}}else last_error=126;
+  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER32_HANDLE;}}else if(eqi(name,"d3d9")||eqi(name,"d3d9.dll")){if(load&&d3d_refs==UINT32_MAX)last_error=8;else{if(load)d3d_refs++;ret=D3D9_HANDLE;}}else last_error=126;
   }else last_error=126;
  }else if(eqi(n,"GetProcAddress")){
   char name[128];argc=2;p=arg(0);q=arg(1);
-  if(p!=KERNEL32_HANDLE&&p!=USER34_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
- }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER34_HANDLE&&user_refs>1){user_refs--;ret=1;}else last_error=6;}
+  if(p!=KERNEL32_HANDLE&&p!=USER32_HANDLE&&p!=D3D9_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):p==USER32_HANDLE?user_export(name):!strcmp(name,"Direct3DCreate9")?d3d_token("Direct3DCreate9"):0;if(!ret)last_error=127;}
+ }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER32_HANDLE&&user_refs>1){user_refs--;ret=1;}else if(p==D3D9_HANDLE&&d3d_refs>1){d3d_refs--;ret=1;}else last_error=6;}
  else if(eqi(n,"GetCommandLineA")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x100;copyguest(ret,cmd,sizeof cmd);}
  else if(eqi(n,"GetCommandLineW")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x200;dst=ptr(ret,2*sizeof cmd);if(!dst)return 0;for(unsigned i=0;i<sizeof cmd;i++){dst[2*i]=cmd[i];dst[2*i+1]=0;}}
  else if(eqi(n,"GetSystemInfo")){argc=1;p=arg(0);dst=ptr(p,36);if(!dst)return 0;memset(dst,0,36);write32(p+4,4096);write32(p+8,0x10000);write32(p+12,0x7ffeffff);write32(p+16,1);write32(p+20,1);write32(p+24,586);write32(p+28,65536);dst[32]=6;}
@@ -598,12 +678,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R34 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R35 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
- report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}close_guest_files();free(image);free(stack);free(heap);return 0;}
+ report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R34.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R35.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
