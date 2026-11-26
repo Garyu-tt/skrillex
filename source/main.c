@@ -126,6 +126,18 @@ static int convert1252(int wide_to_mb,uint32_t src,int32_t len,uint32_t dest,int
  for(int32_t i=0;i<len;i++){unsigned v=wide_to_mb?cp1252_encode(le16(in+2*i),fallback,used):cp1252_decode(in[i]);if(out){out[i*dw]=(uint8_t)v;if(dw==2)out[i*dw+1]=v>>8;}}
  return len;
 }
+static unsigned upper1252(unsigned u){if((u>='a'&&u<='z')||(u>=0xe0&&u<=0xf6)||(u>=0xf8&&u<=0xfe))return u-32;switch(u){case 0xff:return 0x178;case 0x153:return 0x152;case 0x161:return 0x160;case 0x17e:return 0x17d;default:return u;}}
+static unsigned lower1252(unsigned u){if((u>='A'&&u<='Z')||(u>=0xc0&&u<=0xd6)||(u>=0xd8&&u<=0xde))return u+32;switch(u){case 0x178:return 0xff;case 0x152:return 0x153;case 0x160:return 0x161;case 0x17d:return 0x17e;default:return u;}}
+static unsigned type1252(unsigned u){
+ unsigned f=0;if(lower1252(u)!=u)f|=0x101;if(upper1252(u)!=u||u==0xdf||u==0xb5)f|=0x102;
+ if(u>='0'&&u<='9')f|=4;if(u==32||u==0xa0||(u>=9&&u<=13))f|=8;
+ if(u<32||(u>=127&&u<=159))f|=32;if(u==32||u==9||u==0xa0)f|=64;
+ if((u>='0'&&u<='9')||(u>='A'&&u<='F')||(u>='a'&&u<='f'))f|=128;
+ if((u>=33&&u<=126)&&!(f&0x107))f|=16;
+ if(u==0xaa||u==0xba)f|=256;
+ if(u==0xa1||u==0xa7||u==0xab||u==0xb6||u==0xb7||u==0xbb||u==0xbf||(u>=0x2010&&u<=0x2027))f|=16;
+ return f;
+}
 static int api_call(uint32_t target,unsigned iscall){
  if(target<APITOKEN||((target-APITOKEN)&3)||(target-APITOKEN)/4>=import_count)return -1;
  api_arg_offset=iscall?0:4;Import*x=&imports[(target-APITOKEN)/4];const char*n=x->name;unsigned argc=0;uint32_t ret=0,p,q,t;uint8_t*dst;
@@ -191,7 +203,12 @@ static int api_call(uint32_t target,unsigned iscall){
   if(eqi(n,"WriteFile")&&(p==0x10002u||p==0x10003u)&&std_live[p-0x10001u]){dst=t?ptr(q,t):NULL;if(t&&!dst)return 0;if(t){report("Guest console wrote %u bytes\n",t);if(logfile)fwrite(dst,1,t,logfile);}if(done)write32(done,t);ret=1;}
   else if(eqi(n,"ReadFile")&&p==0x10001u&&std_live[0]){if(t&&!ptr(q,t))return 0;ret=1;}else last_error=6;
  }else if(eqi(n,"GetConsoleMode")){argc=2;p=arg(0);q=arg(1);if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u]){write32(q,p==0x10001u?7:3);ret=1;}else last_error=6;}
- else if(eqi(n,"GetCPInfo")){argc=2;p=arg(0);q=arg(1);if(p==0||p==1252||p==437||p==1){dst=ptr(q,20);if(!dst)return 0;memset(dst,0,20);write32(q,1);dst[4]='?';ret=1;}else last_error=87;}
+ else if(eqi(n,"GetStringTypeW")||eqi(n,"GetStringTypeA")){
+  unsigned wide=eqi(n,"GetStringTypeW");argc=wide?4:5;unsigned shift=wide?0:1;uint32_t kind=arg(shift),src=arg(shift+1),out=arg(shift+3);int32_t len=(int32_t)arg(shift+2);unsigned w=wide?2:1;
+  if(kind!=1){report("Unsupported string type %u\n",kind);return 0;}
+  if(len==-1){len=0;while(len<65536){uint8_t*c=ptr(src+(unsigned)len*w,w);if(!c)return 0;len++;if(!(wide?le16(c):*c))break;}}
+  if(len<=0||len>65536){last_error=87;}else{uint8_t*in=ptr(src,(unsigned)len*w);dst=ptr(out,(unsigned)len*2);if(!in||!dst)return 0;for(int32_t i=0;i<len;i++){unsigned u=wide?le16(in+2*i):cp1252_decode(in[i]);unsigned f=type1252(u);dst[2*i]=f;dst[2*i+1]=f>>8;}ret=1;}
+ }else if(eqi(n,"GetCPInfo")){argc=2;p=arg(0);q=arg(1);if(p==0||p==1252||p==437||p==1){dst=ptr(q,20);if(!dst)return 0;memset(dst,0,20);write32(q,1);dst[4]='?';ret=1;}else last_error=87;}
  else if(eqi(n,"IsValidCodePage")){argc=1;p=arg(0);ret=p==1252||p==437;}
  else if(eqi(n,"GetThreadLocale")||eqi(n,"GetUserDefaultLCID")||eqi(n,"GetSystemDefaultLCID")){ret=0x409;}
  else if(eqi(n,"GetUserDefaultLangID")||eqi(n,"GetSystemDefaultLangID")){ret=0x409;}
@@ -274,9 +291,9 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R17 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R18 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R17.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R18.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
