@@ -264,6 +264,41 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
  assert(d3d_fixture_call(com_token(tex,2),(uint32_t[]){tex},1)==1);
  assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,0},3)==0&&!texture_find(tex)&&!texture0);
+ /* Compressed texture blocks stay in guest memory. */
+ assert(texture_size(1024,1024,FMT_DXT1)==524288);
+ assert(texture_size(1024,1024,FMT_DXT5)==1048576);
+ assert(texture_pitch(5,FMT_DXT1)==16&&texture_size(5,7,FMT_DXT1)==32);
+ const uint32_t formats[]={FMT_DXT1,FMT_DXT3,FMT_DXT5};
+ for(unsigned fi=0;fi<3;fi++){
+  uint32_t fmt=formats[fi],block=texture_block_bytes(fmt);
+  assert(d3d_fixture_call(com_token(dev,23),(uint32_t[]){dev,5,7,1,0,fmt,0,texout,0},9)==0);
+  uint32_t obj=read32(texout);GuestTexture*t=texture_find(obj);assert(t);
+  assert(find_block(HEAPBASE,t->data)->requested==block*4);
+  assert(d3d_fixture_call(com_token(obj,19),(uint32_t[]){obj,0,base+0x1b0,0,0},5)==0&&read32(base+0x1b0)==block*2);
+  uint8_t*data=ptr(read32(base+0x1b4),block*4);assert(data);
+  for(unsigned k=0;k<4;k++){
+   uint8_t*b=data+k*block;uint8_t*c=b+(fi?8:0);
+   c[0]=0;c[1]=0xf8;c[2]=0xe0;c[3]=7; /* red, green */
+   c[4]=0xe4; /* selectors 0,1,2,3 in first row */
+   if(fi==1)b[0]=0xf1;
+   if(fi==2){b[0]=200;b[1]=60;b[2]=0x88;b[3]=0x06;} /* alpha selectors 0,1,2,3 */
+  }
+  assert(d3d_fixture_call(com_token(obj,20),(uint32_t[]){obj,0},2)==0);
+  assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,obj},3)==0);
+  assert((texel(0,0)&0xffffff)==0xff0000&&(texel(1,0)&0xffffff)==0x00ff00);
+  assert((texel(2,0)&0xffffff)==0xaa5500&&(texel(3,0)&0xffffff)==0x55aa00);
+  assert((texel(4,6)&0xffffff)==0xff0000);
+  if(fi==0)assert(texel(0,0)==0xffff0000);
+  if(fi==1)assert((texel(0,0)>>24)==17&&(texel(1,0)>>24)==255);
+  if(fi==2)assert((texel(0,0)>>24)==200&&(texel(1,0)>>24)==60&&(texel(2,0)>>24)==180&&(texel(3,0)>>24)==160);
+  assert(d3d_fixture_call(com_token(obj,2),(uint32_t[]){obj},1)==1);
+  assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,0},3)==0&&!texture_find(obj));
+ }
+ /* BC1 transparent mode, and BC3 six-alpha mode. */
+ const uint8_t bc1[]={0,0,0xff,0xff,0x0b,0,0,0};
+ assert(dxt_texel(bc1,FMT_DXT1,0)==0&&dxt_texel(bc1,FMT_DXT1,1)==0xff7f7f7f);
+ uint8_t bc3[16]={10,20,0x3e,0,0,0,0,0,0,0xf8,0,0,0,0,0,0};
+ assert(dxt_texel(bc3,FMT_DXT5,0)==0x00ff0000&&dxt_texel(bc3,FMT_DXT5,1)==0xffff0000);
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
