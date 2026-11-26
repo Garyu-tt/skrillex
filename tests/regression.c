@@ -333,13 +333,13 @@ static void d3d_fixture(void){
  memcpy(image+0x300,world,64);
  assert(d3d_fixture_call(com_token(dev,44),(uint32_t[]){dev,256,mat},3)==0);
  assert(d3d_fixture_call(com_token(dev,45),(uint32_t[]){dev,256,base+0x380},3)==0&&!memcmp(image+0x380,world,64));
- double projected[4];assert(transform_position(-0.25f,0,0.5f,projected));
+ double projected[4],clip[4];assert(transform_clip(-0.25f,0,0.5f,clip)&&project_clip(clip,projected));
  assert(projected[0]==2&&projected[1]==1.5&&projected[2]==0.5&&projected[3]==1);
- assert(!transform_position(1,0,0.5f,projected));
+ assert(transform_clip(1,0,0.5f,clip)&&!project_clip(clip,projected));
  write32(vp,1);write32(vp+4,0);write32(vp+8,2);write32(vp+12,2);write32(vp+16,0);write32(vp+20,0x3f800000);
  assert(d3d_fixture_call(com_token(dev,47),(uint32_t[]){dev,vp},2)==0);
  assert(d3d_fixture_call(com_token(dev,48),(uint32_t[]){dev,base+0x380},2)==0&&!memcmp(image+0x340,image+0x380,24));
- assert(transform_position(-0.25f,0,0.5f,projected)&&projected[0]==2&&projected[1]==1);
+ assert(transform_clip(-0.25f,0,0.5f,clip)&&project_clip(clip,projected)&&projected[0]==2&&projected[1]==1);
  write32(vp+8,4);assert(d3d_fixture_call(com_token(dev,47),(uint32_t[]){dev,vp},2)==D3D_INVALID);
  transform_reset();
  assert(d3d_fixture_call(com_token(dev,89),(uint32_t[]){dev,0x42},2)==0);
@@ -350,6 +350,20 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==0);
  assert(color_buffer[0]==0xffffff00&&color_buffer[3]==0xff000000);
  write32(vertices,0xc0000000);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff000000,0,0},7)==0);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==0);
+ assert(color_buffer[0]==0xffffff00&&color_buffer[3]==0xff000000);
+ for(unsigned i=0;i<3;i++)write32(vertices+16*i,0xc0000000);
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff000000,0,0},7)==0);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==0);
+ for(unsigned i=0;i<12;i++)assert(color_buffer[i]==0xff000000);
+ PipelineVertex ca={.p={-2,0,0.5,1},.u=0},cb={.p={0,1,0.5,1},.u=1},cc={.p={0,-1,0.5,1},.u=1},poly[16];
+ unsigned cn=clip_triangle(ca,cb,cc,poly);assert(cn==4);
+ unsigned boundary=0;for(unsigned i=0;i<cn;i++){for(unsigned plane=0;plane<8;plane++)assert(clip_distance(poly[i],plane)>=0);if(poly[i].p[0]==-1){assert(poly[i].u==0.5);boundary++;}}
+ assert(boundary==2);
+ ca.p[0]=0;ca.p[2]=-0.5;cn=clip_triangle(ca,cb,cc,poly);assert(cn==4);
+ for(unsigned i=0;i<cn;i++)assert(poly[i].p[2]>=0);
+ write32(vertices,0x7fc00000);
  assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,16},5)==D3D_INVALID);
  assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
  RasterVertex pa={.u=0,.v=65536,.rhw=1048576},pb={.u=65536,.v=0,.rhw=524288},pc={.u=0,.v=0,.rhw=1048576};
