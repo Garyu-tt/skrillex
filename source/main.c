@@ -39,6 +39,9 @@ static uint32_t base,size,ip,r[8];
 static int fault;
 static FILE *logfile;
 static unsigned steps;
+#define TRACE_LEN 32u
+typedef struct{uint32_t from,to;unsigned op,flags;} TraceEntry;
+static TraceEntry trace_ring[TRACE_LEN];static unsigned trace_count;
 static uint32_t exception_filter;
 static double fp[8];static unsigned fp_top,fp_mask;static uint16_t fp_control=0x37f,fp_status;
 static void report(const char *fmt,...){va_list a;va_start(a,fmt);vprintf(fmt,a);va_end(a);if(logfile){va_start(a,fmt);vfprintf(logfile,fmt,a);va_end(a);fflush(logfile);}}
@@ -143,7 +146,7 @@ static uint32_t kernel_export(const char*name){
  if(import_count>=MAXIMPORT)return 0;
  unsigned i=import_count++;imports[i]=(Import){"KERNEL32.dll",canonical,0};return APITOKEN+4*i;
 }
-#define USER33_HANDLE 0x7ffa0000u
+#define USER34_HANDLE 0x7ffa0000u
 static unsigned user_refs=1;
 static const char*const user_exports[]={"RegisterClassA","RegisterClassExA","CreateWindowExA","DefWindowProcA","IsWindow","GetClientRect","GetWindowRect","PostMessageA","PeekMessageA","PostQuitMessage","TranslateMessage","DispatchMessageA"};
 static uint32_t user_export(const char*name){
@@ -151,7 +154,7 @@ static uint32_t user_export(const char*name){
  if(!canonical)return 0;
  for(unsigned i=0;i<import_count;i++)if(eqi(imports[i].dll,"user32.dll")&&imports[i].name&&!strcmp(imports[i].name,canonical))return APITOKEN+4*i;
  if(import_count>=MAXIMPORT)return 0;
- unsigned i=import_count++;imports[i]=(Import){"USER33.dll",canonical,0};return APITOKEN+4*i;
+ unsigned i=import_count++;imports[i]=(Import){"USER34.dll",canonical,0};return APITOKEN+4*i;
 }
 static unsigned api_arg_offset;
 static uint32_t arg(unsigned n){return read32(r[4]+api_arg_offset+4*n);}
@@ -379,12 +382,12 @@ static int api_call(uint32_t target,unsigned iscall){
   else if(guest_ascii(p,name,sizeof name,wide)){
    if(eqi(name,"kernel32")||eqi(name,"kernel32.dll")){
    if(load&&kernel_refs==UINT32_MAX){last_error=8;}else{if(load)kernel_refs++;ret=KERNEL32_HANDLE;}
-  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER33_HANDLE;}}else last_error=126;
+  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER34_HANDLE;}}else last_error=126;
   }else last_error=126;
  }else if(eqi(n,"GetProcAddress")){
   char name[128];argc=2;p=arg(0);q=arg(1);
-  if(p!=KERNEL32_HANDLE&&p!=USER33_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
- }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER33_HANDLE&&user_refs>1){user_refs--;ret=1;}else last_error=6;}
+  if(p!=KERNEL32_HANDLE&&p!=USER34_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
+ }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER34_HANDLE&&user_refs>1){user_refs--;ret=1;}else last_error=6;}
  else if(eqi(n,"GetCommandLineA")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x100;copyguest(ret,cmd,sizeof cmd);}
  else if(eqi(n,"GetCommandLineW")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x200;dst=ptr(ret,2*sizeof cmd);if(!dst)return 0;for(unsigned i=0;i<sizeof cmd;i++){dst[2*i]=cmd[i];dst[2*i+1]=0;}}
  else if(eqi(n,"GetSystemInfo")){argc=1;p=arg(0);dst=ptr(p,36);if(!dst)return 0;memset(dst,0,36);write32(p+4,4096);write32(p+8,0x10000);write32(p+12,0x7ffeffff);write32(p+16,1);write32(p+20,1);write32(p+24,586);write32(p+28,65536);dst[32]=6;}
@@ -591,13 +594,16 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  case 0xff:m=byte();g=m>>3&7;o=decode(m,fs);if(g==2||g==4){v=get(o);int ap=api_call(v,g==2);if(ap==0)return 0;if(ap==1)break;if(v>=base&&v-base<size){if(g==2)push(ip);ip=v;break;}report("Indirect transfer not implemented at %08x target=%08x slot=%08x\n",start,v,o.addr);return 0;}if(g==6){v=get(o);push(v);break;}if(g<=1){unsigned old=cflag;v=alu(g?5:0,get(o),1);put(o,v);cflag=old;break;}goto unsupported;
  default:goto unsupported;}
  completed:
- if(fault){report("Guest memory stop at %08x op=%02x\n",start,op);return 0;}steps++;if(steps<=128)report("%03u %08x %s%02x -> %08x\n",steps,start,os16?"66 ":fs?"64 ":"",op,ip);return 1;
+ if(fault){report("Guest memory stop at %08x op=%02x\n",start,op);return 0;}trace_ring[trace_count%TRACE_LEN]=(TraceEntry){start,ip,op,(cflag?1u:0u)|(zflag?2u:0u)|(sflag?4u:0u)|(oflag?8u:0u)};trace_count++;steps++;if(steps<=128)report("%03u %08x %s%02x -> %08x\n",steps,start,os16?"66 ":fs?"64 ":"",op,ip);return 1;
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R33 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}close_guest_files();free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R34 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+ for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
+ report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
+ report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R33.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R34.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
