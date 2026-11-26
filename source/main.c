@@ -243,7 +243,7 @@ static int user_call(const char*n,unsigned*argc,uint32_t*ret){
  }
  if(eqi(n,"CreateWindowExA")){
   *argc=12;uint32_t args[12];for(unsigned i=0;i<12;i++)args[i]=arg(i);if(fault)return 0;
-  if(args[8]||args[9]){report("Child windows and menus not implemented\n");return 0;}
+  if(args[8]||args[9]||(args[3]&0x40000000u)){report("Child windows and menus not implemented\n");return 0;}
   GuestClass*c=class_find(args[1],args[10]);if(!c){last_error=1407;return !fault;}
   w=NULL;for(unsigned i=0;i<WIN_MAX;i++)if(!windows[i].live){w=&windows[i];break;}
   if(!w||window_serial>=0xffff){last_error=8;return 1;}
@@ -261,7 +261,8 @@ static int user_call(const char*n,unsigned*argc,uint32_t*ret){
   if(!wnd_callback(c->proc,h,0x81,0,cs,&v)){w->live=0;return 0;}
   if(!v){r[4]=sp;w->live=0;return 1;}
   if(!wnd_callback(c->proc,h,1,0,cs,&v)){w->live=0;return 0;}
-  r[4]=sp;if(v==UINT32_MAX){w->live=0;return 1;}
+  if(v==UINT32_MAX){if(!wnd_callback(c->proc,h,0x82,0,0,&v)){w->live=0;return 0;}r[4]=sp;w->live=0;return 1;}
+  r[4]=sp;
   *ret=h;report("Virtual window created: %08x %dx%d (no renderer)\n",h,ww,hh);return 1;
  }
  if(eqi(n,"DefWindowProcA")){*argc=4;p=arg(1);if(p==0x81){*ret=1;return 1;}if(p==1||p==2||p==0x82||p==0){return 1;}report("Default window message unsupported: %x\n",p);return 0;}
@@ -313,9 +314,11 @@ static int api_call(uint32_t target,unsigned iscall){
  else if(eqi(n,"GetModuleHandleA")||eqi(n,"GetModuleHandleW")||eqi(n,"LoadLibraryA")||eqi(n,"LoadLibraryW")){
   char name[128]={0};unsigned load=eqi(n,"LoadLibraryA")||eqi(n,"LoadLibraryW"),wide=eqi(n,"GetModuleHandleW")||eqi(n,"LoadLibraryW");argc=1;p=arg(0);
   if(!p&&!load)ret=base;
-  else if(guest_ascii(p,name,sizeof name,wide)&&(eqi(name,"kernel32")||eqi(name,"kernel32.dll"))){
+  else if(guest_ascii(p,name,sizeof name,wide)){
+   if(eqi(name,"kernel32")||eqi(name,"kernel32.dll")){
    if(load&&kernel_refs==UINT32_MAX){last_error=8;}else{if(load)kernel_refs++;ret=KERNEL32_HANDLE;}
-  }else if(!fault&&(eqi(name,"user32")||eqi(name,"user32.dll"))){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER32_HANDLE;}}else last_error=126;
+  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER32_HANDLE;}}else last_error=126;
+  }else last_error=126;
  }else if(eqi(n,"GetProcAddress")){
   char name[128];argc=2;p=arg(0);q=arg(1);
   if(p!=KERNEL32_HANDLE&&p!=USER32_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
