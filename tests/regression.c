@@ -85,4 +85,36 @@ static void user_window_fixture(void){
  assert(!window_find(0x20002u)&&window_find(hwnd)&&!callback_depth);
  free(image);free(stack);image=stack=NULL;size=0;
 }
-int main(void){assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();puts("Synthetic x86, dynamic imports and virtual window fixtures: PASS");return 0;}
+static uint32_t kernel_fixture_call(const char*name,const uint32_t*args,unsigned n){
+ uint32_t sp=BASESTACK+STACKSIZE-256;r[4]=sp;
+ for(unsigned i=0;i<n;i++)write32(sp+4*i,args[i]);
+ uint32_t token=kernel_export(name);assert(token&&api_call(token,1)==1&&!fault&&r[4]==sp+4*n);return r[0];
+}
+static void file_fixture(void){
+ char path[512];
+ assert(resource_path("models\\gta3.img",path,sizeof path)&&!strcmp(path,"models/gta3.img"));
+ assert(resource_path("C:\\games\\Grand Theft Auto San Andreas\\data\\gta.dat",path,sizeof path)&&!strcmp(path,"data/gta.dat"));
+ const char*bad[]={"../file","a/../file","/file","D:/file","C:foo","a//b","a/","a/CON.txt","NUL","COM1","LPT9.txt","a/.. ","a/b:stream","a/."};
+ for(unsigned i=0;i<sizeof bad/sizeof bad[0];i++)assert(!resource_path(bad[i],path,sizeof path));
+ assert(!resource_path("long",path,3));
+ base=0x400000;size=1024;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);
+ fault=0;import_count=api_calls=0;memset(r,0,sizeof r);
+ FILE*f=tmpfile();assert(f);assert(fwrite("abcdef",1,6,f)==6);uint32_t h=file_adopt(f);assert(h!=UINT32_MAX);
+ assert(kernel_fixture_call("GetFileType",(uint32_t[]){h},1)==1);
+ assert(kernel_fixture_call("GetFileSizeEx",(uint32_t[]){h,base+0x100},2)==1&&read32(base+0x100)==6&&read32(base+0x104)==0);
+ assert(kernel_fixture_call("ReadFile",(uint32_t[]){h,base+0x200,4,base+0x110,0},5)==1&&read32(base+0x110)==4&&!memcmp(image+0x200,"abcd",4));
+ assert(kernel_fixture_call("SetFilePointerEx",(uint32_t[]){h,0xfffffffe,UINT32_MAX,base+0x120,2},5)==1&&read32(base+0x120)==4);
+ assert(kernel_fixture_call("ReadFile",(uint32_t[]){h,base+0x200,4,base+0x110,0},5)==1&&read32(base+0x110)==2&&!memcmp(image+0x200,"ef",2));
+ assert(kernel_fixture_call("ReadFile",(uint32_t[]){h,base+0x200,4,base+0x110,0},5)==1&&!read32(base+0x110));
+ assert(kernel_fixture_call("SetFilePointer",(uint32_t[]){h,UINT32_MAX,0,0},4)==UINT32_MAX&&last_error==131);
+ assert(!kernel_fixture_call("WriteFile",(uint32_t[]){h,base+0x200,2,base+0x110,0},5)&&last_error==5);
+ assert(kernel_fixture_call("CloseHandle",(uint32_t[]){h},1)==1&&!file_find(h));
+ assert(!kernel_fixture_call("CloseHandle",(uint32_t[]){h},1)&&last_error==6);
+ memcpy(image,"../file",8);
+ assert(kernel_fixture_call("CreateFileA",(uint32_t[]){base,0x80000000,1,0,3,0,0},7)==UINT32_MAX&&last_error==123);
+ memcpy(image,"valid.dat",10);
+ assert(kernel_fixture_call("CreateFileA",(uint32_t[]){base,0x40000000,1,0,2,0,0},7)==UINT32_MAX&&last_error==5);
+ assert(kernel_fixture_call("CreateFileA",(uint32_t[]){base,0x80000000,1,0,3,0,0},7)==UINT32_MAX&&last_error==2);
+ close_guest_files();free(image);free(stack);image=stack=NULL;size=0;
+}
+int main(void){assert(test());dynamic_import_fixture();instruction_fixture();user_window_fixture();file_fixture();puts("Synthetic x86, dynamic imports, virtual window and file fixtures: PASS");return 0;}
