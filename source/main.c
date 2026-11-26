@@ -112,6 +112,20 @@ static uint32_t heap_realloc(uint32_t h,uint32_t flags,uint32_t p,uint32_t n){He
 static int copyguest(uint32_t a,const void*b,unsigned n){uint8_t*p=ptr(a,n);if(!p)return 0;memcpy(p,b,n);return 1;}
 static Critical* critical_find(uint32_t p,int create){Critical*free_slot=NULL;for(unsigned i=0;i<256;i++){if(criticals[i].active&&criticals[i].address==p)return &criticals[i];if(!criticals[i].active&&!free_slot)free_slot=&criticals[i];}if(!create||!free_slot)return NULL;*free_slot=(Critical){p,0,1};return free_slot;}
 static int critical_write(Critical*c){uint8_t*p=ptr(c->address,24);if(!p)return 0;write32(c->address+4,c->depth?c->depth-1:UINT32_MAX);write32(c->address+8,c->depth);write32(c->address+12,c->depth?1:0);return !fault;}
+static const uint16_t cp1252_special[32]={0x20ac,0x81,0x201a,0x192,0x201e,0x2026,0x2020,0x2021,0x2c6,0x2030,0x160,0x2039,0x152,0x8d,0x17d,0x8f,0x90,0x2018,0x2019,0x201c,0x201d,0x2022,0x2013,0x2014,0x2dc,0x2122,0x161,0x203a,0x153,0x9d,0x17e,0x178};
+static uint16_t cp1252_decode(unsigned b){return b>=128&&b<160?cp1252_special[b-128]:(uint16_t)b;}
+static unsigned cp1252_encode(uint32_t u,unsigned fallback,unsigned*used){if(u<128||(u>=160&&u<=255))return u;for(unsigned j=0;j<32;j++)if(cp1252_special[j]==u)return j+128;*used=1;return fallback;}
+static int convert1252(int wide_to_mb,uint32_t src,int32_t len,uint32_t dest,int32_t cap,unsigned fallback,unsigned*used){
+ unsigned sw=wide_to_mb?2:1,dw=wide_to_mb?1:2;
+ if(!src||len==0||len< -1||cap<0){last_error=87;return 0;}
+ if(len==-1){unsigned i;for(i=0;i<65536;i++){uint8_t*p=ptr(src+i*sw,sw);if(!p)return 0;if(!(sw==2?le16(p):p[0]))break;}if(i==65536){last_error=87;return 0;}len=(int32_t)(i+1);}
+ if(len>65536){last_error=87;return 0;}
+ uint8_t*in=ptr(src,(unsigned)len*sw);if(!in)return 0;
+ if(cap&&(!dest||cap<len)){last_error=cap<len?122:87;return 0;}
+ uint8_t*out=cap?ptr(dest,(unsigned)len*dw):NULL;if(cap&&!out)return 0;
+ for(int32_t i=0;i<len;i++){unsigned v=wide_to_mb?cp1252_encode(le16(in+2*i),fallback,used):cp1252_decode(in[i]);if(out){out[i*dw]=(uint8_t)v;if(dw==2)out[i*dw+1]=v>>8;}}
+ return len;
+}
 static int api_call(uint32_t target,unsigned iscall){
  if(target<APITOKEN||((target-APITOKEN)&3)||(target-APITOKEN)/4>=import_count)return -1;
  api_arg_offset=iscall?0:4;Import*x=&imports[(target-APITOKEN)/4];const char*n=x->name;unsigned argc=0;uint32_t ret=0,p,q,t;uint8_t*dst;
@@ -152,6 +166,13 @@ static int api_call(uint32_t target,unsigned iscall){
   argc=eqi(n,"TlsSetValue")?2:1;p=arg(0);if(p>=64||!(tls_used&(UINT64_C(1)<<p))){last_error=87;ret=0;}
   else if(eqi(n,"TlsFree")){tls_used&=~(UINT64_C(1)<<p);tls_values[p]=0;ret=1;}
   else if(eqi(n,"TlsSetValue")){tls_values[p]=arg(1);ret=1;}else{last_error=0;ret=tls_values[p];}
+ }else if(eqi(n,"WideCharToMultiByte")||eqi(n,"MultiByteToWideChar")){
+  unsigned wide=eqi(n,"WideCharToMultiByte"),used=0,fallback='?';argc=wide?8:6;p=arg(0);q=arg(1);
+  if(p!=0&&p!=1252){report("Unsupported guest code page %u\n",p);return 0;}
+  if(q){report("Unsupported conversion flags %08x\n",q);return 0;}
+  if(wide&&arg(6)){uint8_t*d=ptr(arg(6),1);if(!d)return 0;fallback=*d;}
+  ret=convert1252(wide,arg(2),(int32_t)arg(3),arg(4),(int32_t)arg(5),fallback,&used);
+  if(wide&&arg(7)&&!fault)write32(arg(7),used);
  }else if(eqi(n,"SetHandleCount")){argc=1;ret=arg(0);}
  else if(eqi(n,"GetModuleFileNameA")||eqi(n,"GetModuleFileNameW")){
   static const char path[]="C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe";
@@ -249,9 +270,9 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R15 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R16 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R15.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R16.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
