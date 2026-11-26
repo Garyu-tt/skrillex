@@ -402,6 +402,36 @@ static void d3d_fixture(void){
  blend_op=3;assert(blend_pixel(0xff806040,0xff404080)==0x00000040);
  blend_op=4;assert(blend_pixel(0xff806040,0xff404080)==0xff404040);
  blend_op=5;assert(blend_pixel(0xff806040,0xff404080)==0xff806080);
+ /* Directional light with inverse-transpose world normals. */
+ transform_reset();blend_reset();lighting_reset();
+ GuestMaterial gm={.diffuse={1,1,1,1},.ambient={1,1,1,1}};
+ GuestLight gl={.type=3,.diffuse={1,0.5f,0,1},.direction={0,0,-1}};
+ memcpy(image+0x300,&gm,sizeof gm);memcpy(image+0x350,&gl,sizeof gl);
+ assert(d3d_fixture_call(com_token(dev,49),(uint32_t[]){dev,base+0x300},2)==0);
+ assert(d3d_fixture_call(com_token(dev,50),(uint32_t[]){dev,base+0x300},2)==0&&!memcmp(image+0x300,&gm,sizeof gm));
+ assert(d3d_fixture_call(com_token(dev,51),(uint32_t[]){dev,0,base+0x350},3)==0);
+ assert(d3d_fixture_call(com_token(dev,52),(uint32_t[]){dev,0,base+0x350},3)==0&&!memcmp(image+0x350,&gl,sizeof gl));
+ assert(d3d_fixture_call(com_token(dev,53),(uint32_t[]){dev,0,1},3)==0);
+ assert(d3d_fixture_call(com_token(dev,54),(uint32_t[]){dev,0,base+0x190},3)==0&&read32(base+0x190)==128);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,137,1},3)==0);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,139,0x00202020},3)==0);
+ double lit[4];float facing[3]={0,0,1},away[3]={0,0,-1};
+ assert(light_vertex(facing,lit)&&lit[2]==255&&lit[1]>159.49&&lit[1]<159.51&&lit[0]>31.99&&lit[0]<32.01&&lit[3]==255);
+ assert(light_vertex(away,lit)&&lit[2]>31.99&&lit[2]<32.01&&lit[1]>31.99&&lit[1]<32.01&&lit[0]>31.99&&lit[0]<32.01);
+ float n[3]={1,1,0};double wn[3];transforms[0][0]=2;
+ assert(normal_world(n,wn)&&wn[0]>0.4472&&wn[0]<0.4473&&wn[1]>0.8944&&wn[1]<0.8945);
+ transforms[0][0]=0;assert(!normal_world(n,wn));transform_reset();
+ assert(d3d_fixture_call(com_token(dev,89),(uint32_t[]){dev,0x12},2)==0);
+ assert(d3d_fixture_call(com_token(dev,57),(uint32_t[]){dev,7,0},3)==0);
+ for(unsigned i=0;i<3;i++){memcpy(image+0x200+24*i,xyz[i],12);memcpy(image+0x20c+24*i,facing,12);}
+ assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff000000,0,0},7)==0);
+ assert(d3d_fixture_call(com_token(dev,41),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,83),(uint32_t[]){dev,4,1,vertices,24},5)==0);
+ assert(color_buffer[0]==0xffffa020&&color_buffer[3]==0xff000000);
+ assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
+ assert(d3d_fixture_call(com_token(dev,53),(uint32_t[]){dev,0,0},3)==0);
+ assert(light_vertex(facing,lit)&&lit[2]>31.99&&lit[2]<32.01);
+ lighting_reset();
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
