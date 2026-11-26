@@ -70,6 +70,42 @@ static void cmpxchg_fixture(void){
  uint32_t old=r[1];assert(!step()&&r[1]==old&&!fault&&steps==5);
  free(image);free(stack);image=stack=NULL;size=0;steps=0;
 }
+static void muldiv_fixture(void){
+ static const uint8_t code[]={
+  0xf6,0xe3, /* mul bl */
+  0xf6,0xeb, /* imul bl */
+  0xf6,0xf3, /* div bl */
+  0xf6,0xfb, /* idiv bl */
+  0x66,0xf7,0xe3, /* mul bx */
+  0x66,0xf7,0xeb, /* imul bx */
+  0x66,0xf7,0xf3, /* div bx */
+  0x66,0xf7,0xfb, /* idiv bx */
+  0x66,0x0f,0xaf,0xc3, /* imul ax,bx */
+  0x66,0x69,0xcb,0x00,0x01, /* imul cx,bx,256 */
+  0x66,0x6b,0xcb,0xfe, /* imul cx,bx,-2 */
+  0xf6,0xf3, /* divide by zero */
+  0xf6,0xf3, /* quotient overflow */
+  0x66,0xf7,0xfb /* signed overflow */
+ };
+ base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);memcpy(image,code,sizeof code);
+ fault=0;ip=base;steps=0;memset(r,0,sizeof r);
+ r[0]=0xabcd00ff;r[3]=2;assert(step()&&r[0]==0xabcd01fe&&cflag&&oflag);
+ r[0]=0xabcd00fe;r[3]=3;assert(step()&&r[0]==0xabcdfffa&&!cflag&&!oflag);
+ r[0]=0xabcd0101;r[3]=3;cflag=1;zflag=1;assert(step()&&r[0]==0xabcd0255&&cflag&&zflag);
+ r[0]=0xabcdfff9;r[3]=3;assert(step()&&r[0]==0xabcdfffe);
+ r[0]=0x1234ffff;r[2]=0x56780000;r[3]=2;assert(step()&&r[0]==0x1234fffe&&r[2]==0x56780001&&cflag&&oflag);
+ r[0]=0x1234fffe;r[3]=3;assert(step()&&r[0]==0x1234fffa&&r[2]==0x5678ffff&&!cflag&&!oflag);
+ r[0]=0x12340005;r[2]=0x56780001;r[3]=3;assert(step()&&r[0]==0x12345557&&r[2]==0x56780000);
+ r[0]=0x1234fff9;r[2]=0x5678ffff;r[3]=3;assert(step()&&r[0]==0x1234fffe&&r[2]==0x5678ffff);
+ r[0]=0x12344000;r[3]=3;assert(step()&&r[0]==0x1234c000&&cflag&&oflag);
+ r[1]=0xaabb0000;r[3]=128;assert(step()&&r[1]==0xaabb8000&&cflag&&oflag);
+ assert(step()&&r[1]==0xaabbff00&&!cflag&&!oflag);
+ r[0]=0x12340100;r[3]=0;assert(!step()&&r[0]==0x12340100&&!fault&&steps==11);
+ r[3]=1;assert(!step()&&r[0]==0x12340100&&!fault&&steps==11);
+ r[0]=0x12340000;r[2]=0x56788000;r[3]=65535;
+ assert(!step()&&r[0]==0x12340000&&r[2]==0x56788000&&!fault&&steps==11);
+ free(image);free(stack);image=stack=NULL;size=0;steps=0;
+}
 static void tsc_fixture(void){
  static const uint8_t program[]={0x0f,0x31,0x0f,0x31,0x0f,0xa2};
  base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);memcpy(image,program,sizeof program);
@@ -493,4 +529,4 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
 }
-int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();xadd_fixture();cmpxchg_fixture();tsc_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
+int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();xadd_fixture();cmpxchg_fixture();muldiv_fixture();tsc_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}

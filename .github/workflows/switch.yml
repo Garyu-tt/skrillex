@@ -1,4 +1,4 @@
-name: Skrillex R49 Switch build
+name: Skrillex R50 Switch build
 on:
   push:
     branches: [main]
@@ -37,15 +37,15 @@ jobs:
           export DEVKITPRO=/opt/devkitpro
           export DEVKITA64="$DEVKITPRO/devkitA64"
           export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
-          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o Skrillex-R49.elf
-          nacptool --create Skrillex InfraCare 0.49.0 Skrillex-R49.nacp
-          elf2nro Skrillex-R49.elf Skrillex-R49.nro --nacp=Skrillex-R49.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
-          test "$(dd if=Skrillex-R49.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
-          sha256sum Skrillex-R49.nro > SHA256SUMS
+          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o Skrillex-R50.elf
+          nacptool --create Skrillex InfraCare 0.50.0 Skrillex-R50.nacp
+          elf2nro Skrillex-R50.elf Skrillex-R50.nro --nacp=Skrillex-R50.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
+          test "$(dd if=Skrillex-R50.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
+          sha256sum Skrillex-R50.nro > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: Skrillex-R49-Switch
+          name: Skrillex-R50-Switch
           path: |
-            Skrillex-R49.nro
+            Skrillex-R50.nro
             SHA256SUMS
           if-no-files-found: error
