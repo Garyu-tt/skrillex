@@ -28,7 +28,7 @@ static HeapBlock blocks[MAXBLOCKS];static unsigned block_count;
 static uint32_t tls_values[64];static uint64_t tls_used;
 typedef struct{uint32_t address,depth;unsigned active;} Critical;
 static Critical criticals[256];
-static unsigned zflag,sflag,cflag,oflag,pflag,aflag;
+static unsigned zflag,sflag,cflag,oflag,pflag,aflag,dflag;
 static uint32_t imports_rva,imports_size;
 static uint32_t base,size,ip,r[8];
 static int fault;
@@ -158,7 +158,23 @@ static int api_call(uint32_t target,unsigned iscall){
  report("API %s!%s -> %08x\n",x->dll,n,ret);return 1;
  missing:if(n)report("Unresolved import %s!%s\n",x->dll,n);else report("Unresolved import %s ordinal %u\n",x->dll,x->ordinal);return 0;
 }
-static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0;Operand o;if(fault)return 0;for(unsigned p=0;p<4&&(op==0x64||op==0x66);p++){if(op==0x64)fs=1;else os16=1;op=byte();if(fault)return 0;}if(os16){if(!step16(op,fs))goto unsupported;goto completed;}
+static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0,repeat=0;Operand o;if(fault)return 0;for(unsigned p=0;p<4&&(op==0x64||op==0x66||op==0xf2||op==0xf3);p++){if(op==0x64)fs=1;else if(op==0x66)os16=1;else repeat=op;op=byte();if(fault)return 0;}if(op>=0xa4&&op<=0xaf&&(op<0xa8||op>0xa9)){
+ unsigned width=(op&1)?(os16?2:4):1;uint32_t count=repeat?r[1]:1;
+ if(count>1048576u){report("String operation limit at %08x count=%u\n",start,count);return 0;}
+ for(uint32_t i=0;i<count;i++){
+  unsigned src=(op==0xa4||op==0xa5||op==0xa6||op==0xa7||op==0xac||op==0xad),dest=(op==0xa4||op==0xa5||op==0xa6||op==0xa7||op==0xaa||op==0xab||op==0xae||op==0xaf);
+  uint8_t*sp=src?ptr(fs?ga(r[6],TEBBASE):r[6],width):NULL,*dp=dest?ptr(r[7],width):NULL;if(fault)break;
+  uint32_t x=src?(width==1?sp[0]:width==2?le16(sp):le32(sp)):r[0],y=dest?(width==1?dp[0]:width==2?le16(dp):le32(dp)):0;
+  if(op==0xa4||op==0xa5||op==0xaa||op==0xab){for(unsigned j=0;j<width;j++)dp[j]=(uint8_t)(x>>(8*j));}
+  else if(op==0xac||op==0xad){uint32_t mask=width==1?255:width==2?65535:UINT32_MAX;r[0]=(r[0]&~mask)|(x&mask);}
+  else if(width==4)(void)alu(7,x,y);else if(width==2)(void)alu16(7,x,y);else{uint32_t a8=x&255,b8=y&255,v8=gs(a8,b8)&255;commonflags(v8);sflag=v8>>7;cflag=a8<b8;oflag=((a8^b8)&(a8^v8))>>7&1;aflag=(a8^b8^v8)>>4&1;}
+  if(src)r[6]=dflag?gs(r[6],width):ga(r[6],width);if(dest)r[7]=dflag?gs(r[7],width):ga(r[7],width);
+  if(repeat){r[1]=gs(r[1],1);if((op==0xa6||op==0xa7||op==0xae||op==0xaf)&&((repeat==0xf3&&!zflag)||(repeat==0xf2&&zflag)))break;}
+ }
+ goto completed;
+ }
+ if(repeat)goto unsupported;
+ if(os16){if(!step16(op,fs))goto unsupported;goto completed;}
  if(op>=0x50&&op<=0x57&&!fs){v=r[op-0x50];push(v);}
  else if(op>=0x58&&op<=0x5f&&!fs){v=pop();r[op-0x58]=v;}
  else if(op>=0xb8&&op<=0xbf&&!fs)r[op-0xb8]=imm();
@@ -167,7 +183,7 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  else if(op>=0x91&&op<=0x97&&!fs){g=op&7;v=r[0];r[0]=r[g];r[g]=v;}
  else if(op>=0xb0&&op<=0xb7){o=(Operand){1,op&7,0};put8(o,byte());}
  else switch(op){
- case 0x90:if(fs)goto unsupported;break;
+ case 0x90:if(fs)goto unsupported;break;case 0xfc:dflag=0;break;case 0xfd:dflag=1;break;case 0xf8:cflag=0;break;case 0xf9:cflag=1;break;
  case 0x68:v=imm();push(v);break;case 0x6a:v=(uint32_t)(int32_t)(int8_t)byte();push(v);break;
  case 0xe8:v=imm();push(ip);ip=ga(ip,v);break;case 0xe9:v=imm();ip=ga(ip,v);break;case 0xeb:v=(uint32_t)(int32_t)(int8_t)byte();ip=ga(ip,v);break;
  case 0xc2:v=imm16();ip=pop();r[4]=ga(r[4],v);break;case 0xc3:ip=pop();break;case 0xc9:r[4]=r[5];r[5]=pop();break;
@@ -185,7 +201,7 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  case 0xa9:v=imm();(void)alu(4,r[0],v);break;
  case 0x88:case 0x8a:m=byte();g=m>>3&7;o=decode(m,fs);if(op==0x88)put8(o,get8((Operand){1,g,0}));else put8((Operand){1,g,0},get8(o));break;
  case 0xc6:m=byte();if((m>>3&7)!=0)goto unsupported;o=decode(m,fs);v=byte();put8(o,v);break;
- case 0x0f:m=byte();if(m>=0x80&&m<=0x8f){v=imm();if(condition(m&15))ip=ga(ip,v);}else if(m==0xb6||m==0xbe||m==0xb7||m==0xbf){unsigned mm=byte();o=decode(mm,fs);v=(m&1)?get16(o):get8(o);r[mm>>3&7]=m==0xbe?(uint32_t)(int32_t)(int8_t)v:m==0xbf?(uint32_t)(int32_t)(int16_t)v:v;}else if(m>=0x90&&m<=0x9f){o=decode(byte(),fs);put8(o,condition(m&15));}else{report("Unsupported 0f extension %02x\n",m);goto unsupported;}break;
+ case 0x0f:m=byte();if(m>=0x80&&m<=0x8f){v=imm();if(condition(m&15))ip=ga(ip,v);}else if(m==0xb6||m==0xbe||m==0xb7||m==0xbf){unsigned mm=byte();o=decode(mm,fs);v=(m&1)?get16(o):get8(o);r[mm>>3&7]=m==0xbe?(uint32_t)(int32_t)(int8_t)v:m==0xbf?(uint32_t)(int32_t)(int16_t)v:v;}else if(m>=0x90&&m<=0x9f){o=decode(byte(),fs);put8(o,condition(m&15));}else if(m==0xaf){unsigned mm=byte();o=decode(mm,fs);g=mm>>3&7;int64_t product=(int64_t)(int32_t)r[g]*(int32_t)get(o);r[g]=(uint32_t)product;cflag=oflag=product!=(int64_t)(int32_t)r[g];}else if(m>=0x40&&m<=0x4f){unsigned mm=byte();o=decode(mm,fs);v=get(o);if(condition(m&15))r[mm>>3&7]=v;}else{report("Unsupported 0f extension %02x\n",m);goto unsupported;}break;
  case 0x99:if(fs)goto unsupported;r[2]=(r[0]&0x80000000u)?UINT32_MAX:0;break;
  case 0xf7:m=byte();g=m>>3&7;o=decode(m,fs);a=get(o);if(fault)break;
  if(g==0){b=imm();(void)alu(4,a,b);}
@@ -205,9 +221,9 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R10 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 checks\n");if(path&&load(path)){for(unsigned i=0;i<4096;i++)if(!step())break;report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R11 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R10.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R11.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
