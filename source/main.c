@@ -386,6 +386,11 @@ static GuestIB index_buffers[IB_MAX];static GuestIB* index_stream;
 static unsigned texture_block_bytes(uint32_t fmt){return fmt==FMT_DXT1?8:(fmt==FMT_DXT3||fmt==FMT_DXT5)?16:0;}
 static unsigned texture_pitch(uint32_t w,uint32_t fmt){unsigned block=texture_block_bytes(fmt);return block?((w+3)/4)*block:w*4;}
 static unsigned texture_size(uint32_t w,uint32_t h,uint32_t fmt){return texture_pitch(w,fmt)*(texture_block_bytes(fmt)?(h+3)/4:h);}
+static unsigned mip_dim(unsigned n,unsigned level){n>>=level;return n?n:1;}
+static unsigned mip_count(unsigned w,unsigned h){unsigned n=w>h?w:h,count=1;while(n>1){n>>=1;count++;}return count;}
+static unsigned mip_offset(unsigned w,unsigned h,unsigned fmt,unsigned level){
+ unsigned out=0;for(unsigned i=0;i<level;i++)out+=texture_size(mip_dim(w,i),mip_dim(h,i),fmt);return out;
+}
 static uint32_t rgb565(unsigned c){
  unsigned r=(c>>11)&31,g=(c>>5)&63,b=c&31;
  return 0xff000000u|(((r<<3)|(r>>2))<<16)|(((g<<2)|(g>>4))<<8)|((b<<3)|(b>>2));
@@ -415,7 +420,7 @@ static uint32_t dxt_texel(const uint8_t*p,uint32_t fmt,unsigned i){
  }
  return (color&0x00ffffffu)|((uint32_t)alpha<<24);
 }
-typedef struct{D3DObject com;uint32_t data,width,height,format,pool;unsigned locked;} GuestTexture;
+typedef struct{D3DObject com;uint32_t data,width,height,format,pool;unsigned locked,levels,lod;} GuestTexture;
 static GuestTexture textures[TEX_MAX];static GuestTexture* texture0;
 static unsigned tex_address_u=1,tex_address_v=1,tex_min=1,tex_mag=1;
 static unsigned vertex_bytes(void){return d3d_fvf==0x44?20:d3d_fvf==0x144?28:0;}
@@ -428,13 +433,13 @@ static unsigned tex_coord(int64_t x,unsigned n,unsigned mode){
  int64_t k=x%(int64_t)n;return (unsigned)(k<0?k+n:k);
 }
 static uint32_t texel(int64_t x,int64_t y){
- GuestTexture*t=texture0;unsigned u=tex_coord(x,t->width,tex_address_u),v=tex_coord(y,t->height,tex_address_v);
- const uint8_t*data=heap+(t->data-HEAPBASE);unsigned block=texture_block_bytes(t->format);
- if(block){const uint8_t*p=data+(v/4)*texture_pitch(t->width,t->format)+(u/4)*block;return dxt_texel(p,t->format,(v&3)*4+(u&3));}
- uint32_t c=le32(data+((size_t)v*t->width+u)*4);return t->format==22?c|0xff000000u:c;
+ GuestTexture*t=texture0;unsigned w=mip_dim(t->width,t->lod),h=mip_dim(t->height,t->lod);unsigned u=tex_coord(x,w,tex_address_u),v=tex_coord(y,h,tex_address_v);
+ const uint8_t*data=heap+(t->data-HEAPBASE)+mip_offset(t->width,t->height,t->format,t->lod);unsigned block=texture_block_bytes(t->format);
+ if(block){const uint8_t*p=data+(v/4)*texture_pitch(w,t->format)+(u/4)*block;return dxt_texel(p,t->format,(v&3)*4+(u&3));}
+ uint32_t c=le32(data+((size_t)v*w+u)*4);return t->format==22?c|0xff000000u:c;
 }
 static uint32_t texture_sample(int64_t u,int64_t v){
- int64_t x=u*texture0->width,y=v*texture0->height;
+ int64_t x=u*mip_dim(texture0->width,texture0->lod),y=v*mip_dim(texture0->height,texture0->lod);
  if(tex_min==1)return texel(floor_div(x,65536),floor_div(y,65536));
  x-=32768;y-=32768;
  int64_t ix=floor_div(x,65536),iy=floor_div(y,65536);
@@ -587,18 +592,20 @@ static int texture_call(const char*n,unsigned*argc,uint32_t*ret){
  GuestTexture*t=texture_find(arg(0));if(!t)return 0;*ret=D3D_INVALID;
  if(!strcmp(n,"TexAddRef")){*argc=1;if(t->com.refs==UINT32_MAX)return 0;*ret=++t->com.refs;return 1;}
  if(!strcmp(n,"TexRelease")){*argc=1;if(t->locked&&t->com.refs==1)return 0;texture_unref(t);*ret=t->com.refs;return 1;}
- if(!strcmp(n,"TexGetLevelCount")){*argc=1;*ret=1;return 1;}
+ if(!strcmp(n,"TexGetLevelCount")){*argc=1;*ret=t->levels;return 1;}
+ if(!strcmp(n,"TexSetLOD")){*argc=2;if(t->pool==1){*ret=t->lod;unsigned v=arg(1);t->lod=v<t->levels?v:t->levels-1;}else *ret=0;return 1;}
+ if(!strcmp(n,"TexGetLOD")){*argc=1;*ret=t->lod;return 1;}
  if(!strcmp(n,"TexGetLevelDesc")){
-  *argc=3;if(arg(1))return 1;uint32_t out=arg(2);if(!ptr(out,32))return 0;
-  uint32_t fields[]={t->format,1,0,t->pool,0,0,t->width,t->height};for(unsigned i=0;i<8;i++)write32(out+i*4,fields[i]);*ret=0;return !fault;
+  *argc=3;unsigned level=arg(1);if(level>=t->levels)return 1;uint32_t out=arg(2);if(!ptr(out,32))return 0;
+  uint32_t fields[]={t->format,1,0,t->pool,0,0,mip_dim(t->width,level),mip_dim(t->height,level)};for(unsigned i=0;i<8;i++)write32(out+i*4,fields[i]);*ret=0;return !fault;
  }
  if(!strcmp(n,"TexLockRect")){
-  *argc=5;uint32_t out=arg(2);
-  if(arg(1)||arg(3)||arg(4)||t->locked)return 1;
+  *argc=5;uint32_t out=arg(2);unsigned level=arg(1);
+  if(level>=t->levels||arg(3)||arg(4)||t->locked)return 1;
   if(!ptr(out,8))return 0;
-  write32(out,texture_pitch(t->width,t->format));write32(out+4,t->data);t->locked=1;*ret=0;return !fault;
+  write32(out,texture_pitch(mip_dim(t->width,level),t->format));write32(out+4,t->data+mip_offset(t->width,t->height,t->format,level));t->locked=level+1;*ret=0;return !fault;
  }
- if(!strcmp(n,"TexUnlockRect")){*argc=2;if(!arg(1)&&t->locked){t->locked=0;*ret=0;}return 1;}
+ if(!strcmp(n,"TexUnlockRect")){*argc=2;if(arg(1)<t->levels&&t->locked==arg(1)+1){t->locked=0;*ret=0;}return 1;}
  return 0;
 }
 static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
@@ -648,16 +655,17 @@ static int d3d_call(const char*n,unsigned*argc,uint32_t*ret){
  if(!strcmp(n,"BeginScene")){*argc=1;if(!d3d_scene){d3d_scene=1;*ret=0;}return 1;}
  if(!strcmp(n,"EndScene")){*argc=1;if(d3d_scene){d3d_scene=0;*ret=0;}return 1;}
  if(!strcmp(n,"CreateTexture")){
-  static const char*const methods[22]={[1]="TexAddRef",[2]="TexRelease",[13]="TexGetLevelCount",[17]="TexGetLevelDesc",[19]="TexLockRect",[20]="TexUnlockRect"};
+  static const char*const methods[22]={[1]="TexAddRef",[2]="TexRelease",[11]="TexSetLOD",[12]="TexGetLOD",[13]="TexGetLevelCount",[17]="TexGetLevelDesc",[19]="TexLockRect",[20]="TexUnlockRect"};
   *argc=9;uint32_t w=arg(1),h=arg(2),levels=arg(3),usage=arg(4),fmt=arg(5),pool=arg(6),out=arg(7),shared=arg(8);
   if(!ptr(out,4))return 0;
   write32(out,0);
-  if(!w||!h||w>1024||h>1024||levels!=1||usage||(fmt!=21&&fmt!=22&&!texture_block_bytes(fmt))||pool>2||shared)return 1;
+  if(!w||!h||w>1024||h>1024||levels>mip_count(w,h)||usage||(fmt!=21&&fmt!=22&&!texture_block_bytes(fmt))||pool>2||shared)return 1;
   GuestTexture*t=NULL;for(unsigned i=0;i<TEX_MAX;i++)if(!textures[i].com.refs){t=&textures[i];break;}
   if(!t){*ret=D3D_OUTOFMEMORY;return 1;}
-  uint32_t data=heap_alloc(HEAPBASE,8,texture_size(w,h,fmt));if(!data){*ret=D3D_OUTOFMEMORY;return 1;}
+  if(!levels)levels=mip_count(w,h);
+  uint32_t data=heap_alloc(HEAPBASE,8,mip_offset(w,h,fmt,levels));if(!data){*ret=D3D_OUTOFMEMORY;return 1;}
   D3DObject obj;if(!d3d_object(&obj,22,methods)){HeapBlock*b=find_block(HEAPBASE,data);if(b)b->live=0;*ret=D3D_OUTOFMEMORY;return !fault;}
-  *t=(GuestTexture){obj,data,w,h,fmt,pool,0};write32(out,obj.obj);*ret=0;return 1;
+  *t=(GuestTexture){.com=obj,.data=data,.width=w,.height=h,.format=fmt,.pool=pool,.locked=0,.levels=levels,.lod=0};write32(out,obj.obj);*ret=0;return 1;
  }
  if(!strcmp(n,"SetTexture")){
   *argc=3;if(arg(1))return 1;uint32_t obj=arg(2);GuestTexture*t=obj?texture_find(obj):NULL;
@@ -1017,12 +1025,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R41 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R42 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R41.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R42.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
