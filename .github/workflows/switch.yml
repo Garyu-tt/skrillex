@@ -13,10 +13,14 @@ jobs:
         run: |
           cc -std=c11 -O2 -Wall -Wextra -Werror source/main.c -o skrillex-host
           ./skrillex-host
+          cc -std=c11 -O2 -Wall -Wextra -Werror tests/regression.c -o skrillex-regression
+          ./skrillex-regression
       - name: Sanitizer regression
         run: |
           cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all source/main.c -o skrillex-sanitize
           ./skrillex-sanitize
+          cc -std=c11 -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all tests/regression.c -o skrillex-regression-sanitize
+          ./skrillex-regression-sanitize
   build:
     needs: host-regression
     runs-on: ubuntu-latest
