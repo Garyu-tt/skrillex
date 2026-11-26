@@ -204,6 +204,30 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,81),(uint32_t[]){dev,4,1,1},4)==D3D_INVALID);
  assert(d3d_fixture_call(com_token(dev,81),(uint32_t[]){dev,4,0,1},4)==0);
  assert(color_buffer[0]==0xffff0000&&color_buffer[3]==0xff000000);
+ /* Index buffer and indexed draw use the previously bound vertex stream. */
+ for(unsigned fmt=101;fmt<=102;fmt++){
+  unsigned iw=fmt==101?2:4;uint32_t ibout=base+0x1e0;
+  assert(d3d_fixture_call(com_token(dev,27),(uint32_t[]){dev,3*iw,8,fmt,0,ibout,0},7)==0);
+  uint32_t ib=read32(ibout);assert(ib&&ib_find(ib));
+  assert(d3d_fixture_call(com_token(ib,11),(uint32_t[]){ib,0,0,locked,0},5)==0);
+  uint8_t*idx=ptr(read32(locked),3*iw);assert(idx);
+  memset(idx,0,3*iw);idx[0]=1;idx[iw]=2;idx[2*iw]=3;
+  assert(d3d_fixture_call(com_token(dev,104),(uint32_t[]){dev,ib},2)==D3D_INVALID);
+  assert(d3d_fixture_call(com_token(ib,12),(uint32_t[]){ib},1)==0);
+  assert(d3d_fixture_call(com_token(ib,13),(uint32_t[]){ib,base+0x1b0},2)==0&&read32(base+0x1b0)==fmt&&read32(base+0x1c0)==3*iw);
+  assert(d3d_fixture_call(com_token(dev,104),(uint32_t[]){dev,ib},2)==0);
+  assert(d3d_fixture_call(com_token(dev,105),(uint32_t[]){dev,ibout},2)==0&&read32(ibout)==ib&&ib_find(ib)->com.refs==3);
+  assert(d3d_fixture_call(com_token(ib,2),(uint32_t[]){ib},1)==2);
+  assert(d3d_fixture_call(com_token(dev,43),(uint32_t[]){dev,0,0,1,0xff000000,0,0},7)==0);
+  assert(d3d_fixture_call(com_token(dev,82),(uint32_t[]){dev,4,0,1,3,0,1},7)==D3D_INVALID);
+  assert(d3d_fixture_call(com_token(dev,82),(uint32_t[]){dev,4,UINT32_MAX,1,2,0,1},7)==D3D_INVALID);
+  assert(d3d_fixture_call(com_token(dev,82),(uint32_t[]){dev,4,UINT32_MAX,1,3,1,1},7)==D3D_INVALID);
+  assert(color_buffer[0]==0xff000000);
+  assert(d3d_fixture_call(com_token(dev,82),(uint32_t[]){dev,4,UINT32_MAX,1,3,0,1},7)==0);
+  assert(color_buffer[0]==0xffff0000&&color_buffer[3]==0xff000000);
+  assert(d3d_fixture_call(com_token(ib,2),(uint32_t[]){ib},1)==1);
+  assert(d3d_fixture_call(com_token(dev,104),(uint32_t[]){dev,0},2)==0&&!ib_find(ib)&&!index_stream);
+ }
  assert(d3d_fixture_call(com_token(dev,42),(uint32_t[]){dev},1)==0);
  assert(d3d_fixture_call(com_token(vb,2),(uint32_t[]){vb},1)==1);
  assert(d3d_fixture_call(com_token(dev,100),(uint32_t[]){dev,0,0,0,0},5)==0&&!vb_find(vb)&&!stream0);
