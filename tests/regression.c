@@ -299,6 +299,34 @@ static void d3d_fixture(void){
  assert(dxt_texel(bc1,FMT_DXT1,0)==0&&dxt_texel(bc1,FMT_DXT1,1)==0xff7f7f7f);
  uint8_t bc3[16]={10,20,0x3e,0,0,0,0,0,0,0xf8,0,0,0,0,0,0};
  assert(dxt_texel(bc3,FMT_DXT5,0)==0x00ff0000&&dxt_texel(bc3,FMT_DXT5,1)==0xffff0000);
+ /* Full mip chain: each level has its own native block layout. */
+ assert(mip_count(8,8)==4&&mip_offset(8,8,FMT_DXT1,4)==56);
+ assert(mip_offset(8,8,21,4)==340);
+ assert(d3d_fixture_call(com_token(dev,23),(uint32_t[]){dev,8,8,0,0,FMT_DXT1,1,texout,0},9)==0);
+ uint32_t mtex=read32(texout);GuestTexture*mt=texture_find(mtex);
+ assert(mt&&mt->levels==4&&find_block(HEAPBASE,mt->data)->requested==56);
+ assert(d3d_fixture_call(com_token(mtex,13),(uint32_t[]){mtex},1)==4);
+ const unsigned offsets[]={0,32,40,48},colors[]={0xf800,0x07e0,0x001f,0xffff};
+ for(unsigned lv=0;lv<4;lv++){
+  unsigned dim=8>>lv;
+  assert(d3d_fixture_call(com_token(mtex,17),(uint32_t[]){mtex,lv,base+0x1b0},3)==0);
+  assert(read32(base+0x1c8)==dim&&read32(base+0x1cc)==dim);
+  assert(d3d_fixture_call(com_token(mtex,19),(uint32_t[]){mtex,lv,base+0x1b0,0,0},5)==0);
+  assert(read32(base+0x1b4)==mt->data+offsets[lv]&&read32(base+0x1b0)==(lv?8:16));
+  uint8_t*data=ptr(read32(base+0x1b4),lv?8:32);assert(data);
+  for(unsigned k=0;k<(lv?1u:4u);k++){data[8*k]=colors[lv]&255;data[8*k+1]=colors[lv]>>8;}
+  assert(d3d_fixture_call(com_token(mtex,20),(uint32_t[]){mtex,(lv+1)%4},2)==D3D_INVALID);
+  assert(d3d_fixture_call(com_token(mtex,20),(uint32_t[]){mtex,lv},2)==0);
+ }
+ assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,mtex},3)==0);
+ assert(texture_sample(0,0)==0xffff0000);
+ assert(d3d_fixture_call(com_token(mtex,11),(uint32_t[]){mtex,2},2)==0);
+ assert(d3d_fixture_call(com_token(mtex,12),(uint32_t[]){mtex},1)==2&&texture_sample(32768,32768)==0xff0000ff);
+ assert(d3d_fixture_call(com_token(mtex,11),(uint32_t[]){mtex,99},2)==2);
+ assert(d3d_fixture_call(com_token(mtex,12),(uint32_t[]){mtex},1)==3&&texture_sample(0,0)==0xffffffff);
+ assert(d3d_fixture_call(com_token(mtex,19),(uint32_t[]){mtex,4,base+0x1b0,0,0},5)==D3D_INVALID);
+ assert(d3d_fixture_call(com_token(mtex,2),(uint32_t[]){mtex},1)==1);
+ assert(d3d_fixture_call(com_token(dev,65),(uint32_t[]){dev,0,0},3)==0&&!texture_find(mtex));
  assert(d3d_fixture_call(com_token(root,2),(uint32_t[]){root},1)==1);
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
