@@ -4,6 +4,8 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <limits.h>
+#include <errno.h>
 #ifdef __SWITCH__
 #include <switch.h>
 #endif
@@ -122,7 +124,7 @@ static int bind_imports(void){
 }
 static int eqi(const char*a,const char*b){if(!a||!b)return 0;while(*a&&*b){unsigned x=(unsigned char)*a++,y=(unsigned char)*b++;if(x>='A'&&x<='Z')x+=32;if(y>='A'&&y<='Z')y+=32;if(x!=y)return 0;}return *a==*b;}
 #define KERNEL32_HANDLE 0x7ffb0000u
-static const char* const kernel_exports[]={"CloseHandle","DeleteCriticalSection","EnterCriticalSection","FreeEnvironmentStringsA","FreeEnvironmentStringsW","FreeLibrary","GetACP","GetCPInfo","GetCommandLineA","GetCommandLineW","GetConsoleMode","GetCurrentProcess","GetCurrentProcessId","GetCurrentThread","GetCurrentThreadId","GetEnvironmentStringsA","GetEnvironmentStringsW","GetFileType","GetLastError","GetModuleFileNameA","GetModuleFileNameW","GetModuleHandleA","GetModuleHandleW","GetOEMCP","GetProcAddress","GetProcessHeap","GetStartupInfoA","GetStartupInfoW","GetStdHandle","GetStringTypeA","GetStringTypeW","GetSystemDefaultLCID","GetSystemDefaultLangID","GetSystemInfo","GetSystemTimeAsFileTime","GetThreadLocale","GetTickCount","GetUserDefaultLCID","GetUserDefaultLangID","GetVersion","GetVersionExA","GetVersionExW","HeapAlloc","HeapCreate","HeapDestroy","HeapFree","HeapReAlloc","HeapSize","HeapValidate","InitializeCriticalSection","InitializeCriticalSectionAndSpinCount","IsDebuggerPresent","IsValidCodePage","LCMapStringA","LCMapStringW","LeaveCriticalSection","LoadLibraryA","LoadLibraryW","MultiByteToWideChar","QueryPerformanceCounter","QueryPerformanceFrequency","ReadFile","SetHandleCount","SetLastError","SetStdHandle","SetUnhandledExceptionFilter","TlsAlloc","TlsFree","TlsGetValue","TlsSetValue","TryEnterCriticalSection","WideCharToMultiByte","WriteFile","lstrlenA","lstrlenW"};
+static const char* const kernel_exports[]={"CreateFileA","CreateFileW","GetFileSize","GetFileSizeEx","SetFilePointer","SetFilePointerEx","GetFileAttributesA","GetFileAttributesW","GetCurrentDirectoryA","GetCurrentDirectoryW","CloseHandle","DeleteCriticalSection","EnterCriticalSection","FreeEnvironmentStringsA","FreeEnvironmentStringsW","FreeLibrary","GetACP","GetCPInfo","GetCommandLineA","GetCommandLineW","GetConsoleMode","GetCurrentProcess","GetCurrentProcessId","GetCurrentThread","GetCurrentThreadId","GetEnvironmentStringsA","GetEnvironmentStringsW","GetFileType","GetLastError","GetModuleFileNameA","GetModuleFileNameW","GetModuleHandleA","GetModuleHandleW","GetOEMCP","GetProcAddress","GetProcessHeap","GetStartupInfoA","GetStartupInfoW","GetStdHandle","GetStringTypeA","GetStringTypeW","GetSystemDefaultLCID","GetSystemDefaultLangID","GetSystemInfo","GetSystemTimeAsFileTime","GetThreadLocale","GetTickCount","GetUserDefaultLCID","GetUserDefaultLangID","GetVersion","GetVersionExA","GetVersionExW","HeapAlloc","HeapCreate","HeapDestroy","HeapFree","HeapReAlloc","HeapSize","HeapValidate","InitializeCriticalSection","InitializeCriticalSectionAndSpinCount","IsDebuggerPresent","IsValidCodePage","LCMapStringA","LCMapStringW","LeaveCriticalSection","LoadLibraryA","LoadLibraryW","MultiByteToWideChar","QueryPerformanceCounter","QueryPerformanceFrequency","ReadFile","SetHandleCount","SetLastError","SetStdHandle","SetUnhandledExceptionFilter","TlsAlloc","TlsFree","TlsGetValue","TlsSetValue","TryEnterCriticalSection","WideCharToMultiByte","WriteFile","lstrlenA","lstrlenW"};
 static unsigned kernel_refs=1;
 static int guest_ascii(uint32_t p,char*out,unsigned cap,unsigned wide){
  if(!p||cap<2)return 0;
@@ -141,7 +143,7 @@ static uint32_t kernel_export(const char*name){
  if(import_count>=MAXIMPORT)return 0;
  unsigned i=import_count++;imports[i]=(Import){"KERNEL32.dll",canonical,0};return APITOKEN+4*i;
 }
-#define USER32_HANDLE 0x7ffa0000u
+#define USER33_HANDLE 0x7ffa0000u
 static unsigned user_refs=1;
 static const char*const user_exports[]={"RegisterClassA","RegisterClassExA","CreateWindowExA","DefWindowProcA","IsWindow","GetClientRect","GetWindowRect","PostMessageA","PeekMessageA","PostQuitMessage","TranslateMessage","DispatchMessageA"};
 static uint32_t user_export(const char*name){
@@ -149,7 +151,7 @@ static uint32_t user_export(const char*name){
  if(!canonical)return 0;
  for(unsigned i=0;i<import_count;i++)if(eqi(imports[i].dll,"user32.dll")&&imports[i].name&&!strcmp(imports[i].name,canonical))return APITOKEN+4*i;
  if(import_count>=MAXIMPORT)return 0;
- unsigned i=import_count++;imports[i]=(Import){"USER32.dll",canonical,0};return APITOKEN+4*i;
+ unsigned i=import_count++;imports[i]=(Import){"USER33.dll",canonical,0};return APITOKEN+4*i;
 }
 static unsigned api_arg_offset;
 static uint32_t arg(unsigned n){return read32(r[4]+api_arg_offset+4*n);}
@@ -289,6 +291,66 @@ static int user_call(const char*n,unsigned*argc,uint32_t*ret){
  if(eqi(n,"DispatchMessageA")){*argc=1;p=arg(0);if(!ptr(p,28))return 0;h=read32(p);q=read32(p+4);v=read32(p+8);uint32_t lp=read32(p+12);if(!h)return 1;w=window_find(h);if(!w){last_error=1400;return 1;}return wnd_callback(w->proc,h,q,v,lp,ret);}
  return 0;
 }
+#define FILE_MAX 64u
+#define FILE_BASE 0x30000u
+#define FILE_LIMIT 1048576u
+typedef struct{FILE*f;uint32_t handle;uint64_t length;} GuestFile;
+static GuestFile files[FILE_MAX];static unsigned file_serial;
+static const char guest_dir[]="C:\\games\\Grand Theft Auto San Andreas";
+#ifdef __SWITCH__
+static const char resource_dir[]="sdmc:/games/Grand Theft Auto San Andreas/";
+#endif
+/* No host paths, parent traversal, alternate drives, streams or device names. */
+static int resource_path(const char*raw,char*out,unsigned cap){
+ unsigned n=0;char normalized[512];unsigned len=0;
+ for(;raw[len];len++){if(len>=sizeof normalized-1)return 0;unsigned char c=raw[len];if(c<32||c>=127)return 0;normalized[len]=c=='\\'?'/':(char)c;}
+ normalized[len]=0;const char*p=normalized;
+ const char prefix[]="C:/games/Grand Theft Auto San Andreas/";unsigned plen=sizeof prefix-1;
+ if(len>=plen){char front[sizeof prefix];memcpy(front,p,plen);front[plen]=0;if(eqi(front,prefix))p+=plen;}
+ if(*p=='/'||!*p)return 0;
+ while(*p){const char*q=p;while(*q&&*q!='/')q++;unsigned k=(unsigned)(q-p);
+  if(!k||p[k-1]=='.'||p[k-1]==' '||p[0]==' '||k>255)return 0;
+  if((k==1&&p[0]=='.')||(k==2&&p[0]=='.'&&p[1]=='.'))return 0;
+  char stem[256];unsigned j=0;for(;j<k&&p[j]!='.';j++)stem[j]=p[j];stem[j]=0;
+  if(eqi(stem,"CON")||eqi(stem,"PRN")||eqi(stem,"AUX")||eqi(stem,"NUL")||((j==4)&&(stem[3]>='1'&&stem[3]<='9')&&(((stem[0]=='C'||stem[0]=='c')&&(stem[1]=='O'||stem[1]=='o')&&(stem[2]=='M'||stem[2]=='m'))||((stem[0]=='L'||stem[0]=='l')&&(stem[1]=='P'||stem[1]=='p')&&(stem[2]=='T'||stem[2]=='t')))))return 0;
+  for(j=0;j<k;j++){unsigned char c=p[j];if(c==':'||c=='*'||c=='?'||c=='"'||c=='<'||c=='>'||c=='|')return 0;}
+  if(n+k+1>=cap)return 0;
+  memcpy(out+n,p,k);n+=k;if(!*q)break;out[n++]='/';p=q+1;if(!*p)return 0;
+ }
+ out[n]=0;return n!=0;
+}
+static GuestFile* file_find(uint32_t h){for(unsigned i=0;i<FILE_MAX;i++)if(files[i].f&&files[i].handle==h)return &files[i];return NULL;}
+static uint32_t file_adopt(FILE*f){if(!f)return UINT32_MAX;unsigned i;for(i=0;i<FILE_MAX&&files[i].f;i++){}
+ if(i==FILE_MAX||file_serial>=0xffff){fclose(f);last_error=4;return UINT32_MAX;}
+ if(fseek(f,0,SEEK_END)){fclose(f);last_error=30;return UINT32_MAX;}long end=ftell(f);
+ if(end<0||fseek(f,0,SEEK_SET)){fclose(f);last_error=30;return UINT32_MAX;}
+ uint32_t h=FILE_BASE+(++file_serial);files[i]=(GuestFile){f,h,(uint64_t)end};return h;
+}
+static FILE* resource_open(const char*relative){
+#ifdef __SWITCH__
+ char full[768];int n=snprintf(full,sizeof full,"%s%s",resource_dir,relative);
+ if(n<0||(unsigned)n>=sizeof full){last_error=206;return NULL;}
+ FILE*f=fopen(full,"rb");if(!f)last_error=errno==EACCES?5:2;return f;
+#else
+ (void)relative;last_error=2;return NULL; /* host resource mount deliberately disabled */
+#endif
+}
+static uint32_t file_open_guest(uint32_t name,unsigned wide,uint32_t access,uint32_t share,uint32_t security,uint32_t disposition,uint32_t flags,uint32_t tmpl){
+ char raw[512],path[512];
+ if(access!=0x80000000u||disposition!=3||security||tmpl||(flags&~0x08000080u)||(share&~7u)){last_error=5;return UINT32_MAX;}
+ if(!guest_ascii(name,raw,sizeof raw,wide)||!resource_path(raw,path,sizeof path)){last_error=123;return UINT32_MAX;}
+ return file_adopt(resource_open(path));
+}
+static int file_seek(GuestFile*f,int64_t off,unsigned method,uint64_t*out){
+ if(method>2){last_error=87;return 0;}
+ long cur=ftell(f->f);if(cur<0){last_error=30;return 0;}
+ uint64_t origin=method==0?0:method==1?(uint64_t)cur:f->length;
+ uint64_t target;if(off<0){uint64_t mag=(uint64_t)(-(off+1))+1;if(mag>origin){last_error=131;return 0;}target=origin-mag;}
+ else{if((uint64_t)off>UINT64_MAX-origin){last_error=87;return 0;}target=origin+(uint64_t)off;}
+ if(target>LONG_MAX||fseek(f->f,(long)target,SEEK_SET)){last_error=131;return 0;}
+ *out=target;return 1;
+}
+static void close_guest_files(void){for(unsigned i=0;i<FILE_MAX;i++)if(files[i].f){fclose(files[i].f);files[i].f=NULL;}}
 static int api_call(uint32_t target,unsigned iscall){
  if(target<APITOKEN||((target-APITOKEN)&3)||(target-APITOKEN)/4>=import_count)return -1;
  api_arg_offset=iscall?0:4;Import*x=&imports[(target-APITOKEN)/4];const char*n=x->name;unsigned argc=0;uint32_t ret=0,p,q,t;uint8_t*dst;
@@ -317,12 +379,12 @@ static int api_call(uint32_t target,unsigned iscall){
   else if(guest_ascii(p,name,sizeof name,wide)){
    if(eqi(name,"kernel32")||eqi(name,"kernel32.dll")){
    if(load&&kernel_refs==UINT32_MAX){last_error=8;}else{if(load)kernel_refs++;ret=KERNEL32_HANDLE;}
-  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER32_HANDLE;}}else last_error=126;
+  }else if(eqi(name,"user32")||eqi(name,"user32.dll")){if(load&&user_refs==UINT32_MAX)last_error=8;else{if(load)user_refs++;ret=USER33_HANDLE;}}else last_error=126;
   }else last_error=126;
  }else if(eqi(n,"GetProcAddress")){
   char name[128];argc=2;p=arg(0);q=arg(1);
-  if(p!=KERNEL32_HANDLE&&p!=USER32_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
- }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER32_HANDLE&&user_refs>1){user_refs--;ret=1;}else last_error=6;}
+  if(p!=KERNEL32_HANDLE&&p!=USER33_HANDLE){last_error=6;}else if(q<=65535||!guest_ascii(q,name,sizeof name,0)){last_error=127;}else{ret=p==KERNEL32_HANDLE?kernel_export(name):user_export(name);if(!ret)last_error=127;}
+ }else if(eqi(n,"FreeLibrary")){argc=1;p=arg(0);if(p==KERNEL32_HANDLE&&kernel_refs>1){kernel_refs--;ret=1;}else if(p==USER33_HANDLE&&user_refs>1){user_refs--;ret=1;}else last_error=6;}
  else if(eqi(n,"GetCommandLineA")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x100;copyguest(ret,cmd,sizeof cmd);}
  else if(eqi(n,"GetCommandLineW")){static const char cmd[]="\"C:\\games\\Grand Theft Auto San Andreas\\gta_sa.exe\"";ret=HEAPBASE+0x200;dst=ptr(ret,2*sizeof cmd);if(!dst)return 0;for(unsigned i=0;i<sizeof cmd;i++){dst[2*i]=cmd[i];dst[2*i+1]=0;}}
  else if(eqi(n,"GetSystemInfo")){argc=1;p=arg(0);dst=ptr(p,36);if(!dst)return 0;memset(dst,0,36);write32(p+4,4096);write32(p+8,0x10000);write32(p+12,0x7ffeffff);write32(p+16,1);write32(p+20,1);write32(p+24,586);write32(p+28,65536);dst[32]=6;}
@@ -361,12 +423,18 @@ static int api_call(uint32_t target,unsigned iscall){
   argc=1;p=arg(0);unsigned w=eqi(n,"lstrlenW")?2:1;if(p){for(uint32_t i=0;i<65536;i++){dst=ptr(p+i*w,w);if(!dst)return 0;if(!(w==1?dst[0]:le16(dst))){ret=i;break;}if(i==65535){report("Guest string limit\n");return 0;}}}
  }else if(eqi(n,"GetStdHandle")){argc=1;p=arg(0);if(p==0xfffffff6u||p==0xfffffff5u||p==0xfffffff4u)ret=std_handles[0xfffffff6u-p];else{last_error=87;ret=UINT32_MAX;}}
  else if(eqi(n,"SetStdHandle")){argc=2;p=arg(0);q=arg(1);if(p==0xfffffff6u||p==0xfffffff5u||p==0xfffffff4u){std_handles[0xfffffff6u-p]=q;ret=1;}else last_error=87;}
- else if(eqi(n,"GetFileType")){argc=1;p=arg(0);if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u])ret=2;else last_error=6;}
- else if(eqi(n,"CloseHandle")){argc=1;p=arg(0);if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u]){std_live[p-0x10001u]=0;ret=1;}else last_error=6;}
+ else if(eqi(n,"CreateFileA")||eqi(n,"CreateFileW")){argc=7;uint32_t v[7];for(unsigned i=0;i<7;i++)v[i]=arg(i);if(fault)return 0;ret=file_open_guest(v[0],eqi(n,"CreateFileW"),v[1],v[2],v[3],v[4],v[5],v[6]);}
+ else if(eqi(n,"GetFileAttributesA")||eqi(n,"GetFileAttributesW")){argc=1;char raw[512],path[512];ret=UINT32_MAX;if(guest_ascii(arg(0),raw,sizeof raw,eqi(n,"GetFileAttributesW"))&&resource_path(raw,path,sizeof path)){FILE*f=resource_open(path);if(f){fclose(f);ret=0x80;}}else last_error=123;}
+ else if(eqi(n,"GetCurrentDirectoryA")||eqi(n,"GetCurrentDirectoryW")){argc=2;unsigned wide=eqi(n,"GetCurrentDirectoryW"),n=sizeof guest_dir;p=arg(0);q=arg(1);if(p<n)ret=n;else{dst=ptr(q,n*(wide?2:1));if(!dst)return 0;for(unsigned i=0;i<n;i++){dst[i*(wide?2:1)]=(uint8_t)guest_dir[i];if(wide)dst[2*i+1]=0;}ret=n-1;}}
+ else if(eqi(n,"GetFileSize")||eqi(n,"GetFileSizeEx")){argc=2;p=arg(0);q=arg(1);GuestFile*f=file_find(p);unsigned ex=eqi(n,"GetFileSizeEx");if(!f){last_error=6;ret=ex?0:UINT32_MAX;}else if(ex){write32(q,(uint32_t)f->length);write32(q+4,(uint32_t)(f->length>>32));ret=1;}else{if(q)write32(q,(uint32_t)(f->length>>32));ret=(uint32_t)f->length;last_error=0;}}
+ else if(eqi(n,"SetFilePointer")||eqi(n,"SetFilePointerEx")){argc=4;p=arg(0);q=arg(1);t=arg(2);uint64_t pos=0;GuestFile*f=file_find(p);unsigned ex=eqi(n,"SetFilePointerEx");uint32_t high=ex?t:t?read32(t):((int32_t)q<0?UINT32_MAX:0),out=ex?arg(3):t,method=ex?arg(4):arg(3);if(ex)argc=5;int64_t off=(int64_t)(((uint64_t)high<<32)|q);if(!f){last_error=6;ret=ex?0:UINT32_MAX;}else if(fault||!file_seek(f,off,method,&pos)){ret=ex?0:UINT32_MAX;}else{if(out){if(ex){write32(out,(uint32_t)pos);write32(out+4,(uint32_t)(pos>>32));}else write32(out,(uint32_t)(pos>>32));}ret=ex?1:(uint32_t)pos;last_error=0;}}
+ else if(eqi(n,"GetFileType")){argc=1;p=arg(0);if(file_find(p))ret=1;else if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u])ret=2;else last_error=6;}
+ else if(eqi(n,"CloseHandle")){argc=1;p=arg(0);GuestFile*f=file_find(p);if(f){int status=fclose(f->f);f->f=NULL;ret=status==0;if(!ret)last_error=30;}else if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u]){std_live[p-0x10001u]=0;ret=1;}else last_error=6;}
  else if(eqi(n,"WriteFile")||eqi(n,"ReadFile")){argc=5;p=arg(0);q=arg(1);t=arg(2);uint32_t done=arg(3),overlap=arg(4);
   if(overlap){report("Asynchronous file IO unavailable\n");return 0;}
   if(done)write32(done,0);
-  if(t>65536u){report("Guest console IO request too large\n");return 0;}
+  if(t>FILE_LIMIT){report("Guest IO request too large\n");return 0;}
+  GuestFile*f=file_find(p);if(f){if(eqi(n,"WriteFile")){last_error=5;}else{dst=t?ptr(q,t):NULL;if(t&&!dst)return 0;if(fault)return 0;size_t got=t?fread(dst,1,t,f->f):0;if(done)write32(done,(uint32_t)got);if(ferror(f->f)){last_error=30;clearerr(f->f);}else ret=1;}}else
   if(eqi(n,"WriteFile")&&(p==0x10002u||p==0x10003u)&&std_live[p-0x10001u]){dst=t?ptr(q,t):NULL;if(t&&!dst)return 0;if(t){report("Guest console wrote %u bytes\n",t);if(logfile)fwrite(dst,1,t,logfile);}if(done)write32(done,t);ret=1;}
   else if(eqi(n,"ReadFile")&&p==0x10001u&&std_live[0]){if(t&&!ptr(q,t))return 0;ret=1;}else last_error=6;
  }else if(eqi(n,"GetConsoleMode")){argc=2;p=arg(0);q=arg(1);if(p>=0x10001u&&p<=0x10003u&&std_live[p-0x10001u]){write32(q,p==0x10001u?7:3);ret=1;}else last_error=6;}
@@ -527,9 +595,9 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R32 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R33 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R32.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R33.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
