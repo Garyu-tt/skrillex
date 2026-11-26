@@ -7,9 +7,9 @@ Goal: implement user-mode IA-32 semantics on ARM64 first, then Intel64. Proton/W
 | Integer ALU | Partial: ADD/ADC/SUB/SBB/CMP/AND/OR/XOR/TEST/INC/DEC/NEG/NOT | Audit encodings, defined flags, faults, widths |
 | Data transfer | Partial MOV/MOVZX/MOVSX/LEA/XCHG/BSWAP | Segment forms, 16-bit variants, address-size prefix, POP r/m, far forms |
 | Multiply/divide | 8/16/32-bit MUL/IMUL/DIV/IDIV candidate R50 | Architectural exception delivery, complete operand/prefix audit |
-| Shifts/rotates | Partial 8/16/32-bit group 2 | SHLD/SHRD, defined flags audit |
-| Bit manipulation | Partial BT/BTS/BTR/BTC/BSF/BSR | 16-bit forms, memory offsets, LOCK legality |
-| Atomic RMW | XADD partial in R48; CMPXCHG candidate R49 | CMPXCHG8B, other valid LOCK forms, memory model, thread scheduler |
+| Shifts/rotates | Partial 8/16/32-bit group 2 | SHLD/SHRD 16/32 candidate R51; defined flags audit |
+| Bit manipulation | Partial BT/BTS/BTR/BTC/BSF/BSR | 16-bit forms and LOCK memory modification candidate R51; audit encoding and prefix legality |
+| Atomic RMW | XADD partial in R48; CMPXCHG candidate R49 | CMPXCHG8B candidate R51; other valid LOCK forms, memory model, thread scheduler |
 | Branch/call/stack | Partial Jcc/JMP/CALL/RET/LOOP/CMOV/SETcc/PUSH/POP | Operand/address sizes, ENTER, far transfers, exceptions |
 | Strings | Partial MOVS/CMPS/STOS/LODS/SCAS and REP | Address size, restart semantics, segment handling |
 | Legacy adjust | Not audited | AAA/AAS/DAA/DAS/AAM/AAD |
