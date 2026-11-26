@@ -25,6 +25,9 @@ static unsigned import_count;
 static unsigned heap_live[MAXHEAPS]={1};
 typedef struct{uint32_t address,capacity,requested,owner;unsigned live;} HeapBlock;
 static HeapBlock blocks[MAXBLOCKS];static unsigned block_count;
+static uint32_t tls_values[64];static uint64_t tls_used;
+typedef struct{uint32_t address,depth;unsigned active;} Critical;
+static Critical criticals[256];
 static unsigned zflag,sflag,cflag,oflag,pflag,aflag;
 static uint32_t imports_rva,imports_size;
 static uint32_t base,size,ip,r[8];
@@ -104,6 +107,8 @@ static uint32_t heap_realloc(uint32_t h,uint32_t flags,uint32_t p,uint32_t n){He
  if(n<=b->capacity){if((flags&8)&&n>b->requested)memset(heap+p-HEAPBASE+b->requested,0,n-b->requested);b->requested=n;return p;}
  if(flags&16){last_error=8;return 0;}uint32_t np=heap_alloc(h,flags,n);if(!np)return 0;memcpy(heap+np-HEAPBASE,heap+p-HEAPBASE,b->requested);b->live=0;return np;}
 static int copyguest(uint32_t a,const void*b,unsigned n){uint8_t*p=ptr(a,n);if(!p)return 0;memcpy(p,b,n);return 1;}
+static Critical* critical_find(uint32_t p,int create){Critical*free_slot=NULL;for(unsigned i=0;i<256;i++){if(criticals[i].active&&criticals[i].address==p)return &criticals[i];if(!criticals[i].active&&!free_slot)free_slot=&criticals[i];}if(!create||!free_slot)return NULL;*free_slot=(Critical){p,0,1};return free_slot;}
+static int critical_write(Critical*c){uint8_t*p=ptr(c->address,24);if(!p)return 0;write32(c->address+4,c->depth?c->depth-1:UINT32_MAX);write32(c->address+8,c->depth);write32(c->address+12,c->depth?1:0);return !fault;}
 static int api_call(uint32_t target,unsigned iscall){
  if(target<APITOKEN||((target-APITOKEN)&3)||(target-APITOKEN)/4>=import_count)return -1;
  api_arg_offset=iscall?0:4;Import*x=&imports[(target-APITOKEN)/4];const char*n=x->name;unsigned argc=0;uint32_t ret=0,p,q,t;uint8_t*dst;
@@ -133,7 +138,18 @@ static int api_call(uint32_t target,unsigned iscall){
  else if(eqi(n,"GetStartupInfoA")||eqi(n,"GetStartupInfoW")){argc=1;p=arg(0);dst=ptr(p,68);if(!dst)return 0;memset(dst,0,68);write32(p,68);write32(p+56,0xffffffffu);write32(p+60,0xffffffffu);write32(p+64,0xffffffffu);}
  else if(eqi(n,"GetEnvironmentStringsA")||eqi(n,"GetEnvironmentStringsW")){ret=HEAPBASE+0x400;dst=ptr(ret,4);if(!dst)return 0;memset(dst,0,4);}
  else if(eqi(n,"FreeEnvironmentStringsA")||eqi(n,"FreeEnvironmentStringsW")){argc=1;ret=arg(0)==HEAPBASE+0x400;if(!ret)last_error=87;}
- else if(eqi(n,"GetACP")||eqi(n,"GetOEMCP")){ret=eqi(n,"GetACP")?1252:437;}
+ else if(eqi(n,"InitializeCriticalSection")||eqi(n,"InitializeCriticalSectionAndSpinCount")){
+  argc=eqi(n,"InitializeCriticalSection")?1:2;p=arg(0);dst=ptr(p,24);if(!dst)return 0;Critical*c=critical_find(p,1);if(!c){report("Critical section capacity exceeded\n");return 0;}c->depth=0;memset(dst,0,24);if(argc==2)write32(p+20,arg(1));if(!critical_write(c))return 0;ret=argc==2;
+ }else if(eqi(n,"EnterCriticalSection")||eqi(n,"TryEnterCriticalSection")||eqi(n,"LeaveCriticalSection")||eqi(n,"DeleteCriticalSection")){
+  argc=1;p=arg(0);Critical*c=critical_find(p,0);if(!c){report("Invalid guest critical section %08x\n",p);return 0;}
+  if(eqi(n,"DeleteCriticalSection")){if(c->depth){report("Deleting held guest critical section\n");return 0;}c->active=0;}
+  else{if(eqi(n,"LeaveCriticalSection")){if(!c->depth){report("Guest critical section not held\n");return 0;}c->depth--;}else{if(c->depth==UINT32_MAX){report("Guest critical recursion overflow\n");return 0;}c->depth++;ret=eqi(n,"TryEnterCriticalSection");}if(!critical_write(c))return 0;}
+ }else if(eqi(n,"TlsAlloc")){ret=UINT32_MAX;for(unsigned i=0;i<64;i++)if(!(tls_used&(UINT64_C(1)<<i))){tls_used|=UINT64_C(1)<<i;tls_values[i]=0;ret=i;break;}if(ret==UINT32_MAX)last_error=8;}
+ else if(eqi(n,"TlsFree")||eqi(n,"TlsGetValue")||eqi(n,"TlsSetValue")){
+  argc=eqi(n,"TlsSetValue")?2:1;p=arg(0);if(p>=64||!(tls_used&(UINT64_C(1)<<p))){last_error=87;ret=0;}
+  else if(eqi(n,"TlsFree")){tls_used&=~(UINT64_C(1)<<p);tls_values[p]=0;ret=1;}
+  else if(eqi(n,"TlsSetValue")){tls_values[p]=arg(1);ret=1;}else{last_error=0;ret=tls_values[p];}
+ }else if(eqi(n,"GetACP")||eqi(n,"GetOEMCP")){ret=eqi(n,"GetACP")?1252:437;}
  else if(eqi(n,"IsDebuggerPresent")){ret=0;}
  else goto missing;
  if(fault)return 0;
@@ -189,9 +205,9 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R09 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 checks\n");if(path&&load(path)){for(unsigned i=0;i<4096;i++)if(!step())break;report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int run(const char*path){report("Skrillex R10 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 checks\n");if(path&&load(path)){for(unsigned i=0;i<4096;i++)if(!step())break;report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R09.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R10.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
