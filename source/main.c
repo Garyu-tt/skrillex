@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <math.h>
 #ifdef __SWITCH__
 #include <switch.h>
 #endif
@@ -36,6 +37,7 @@ static uint32_t base,size,ip,r[8];
 static int fault;
 static FILE *logfile;
 static unsigned steps;
+static double fp[8];static unsigned fp_top,fp_mask;static uint16_t fp_control=0x37f,fp_status;
 static void report(const char *fmt,...){va_list a;va_start(a,fmt);vprintf(fmt,a);va_end(a);if(logfile){va_start(a,fmt);vfprintf(logfile,fmt,a);va_end(a);fflush(logfile);}}
 static uint32_t le32(const uint8_t*p){return (uint32_t)p[0]|(uint32_t)p[1]<<8|(uint32_t)p[2]<<16|(uint32_t)p[3]<<24;}
 static unsigned le16(const uint8_t*p){return p[0]|p[1]<<8;}
@@ -231,6 +233,43 @@ static int api_call(uint32_t target,unsigned iscall){
  report("API %s!%s -> %08x\n",x->dll,n,ret);return 1;
  missing:if(n)report("Unresolved import %s!%s\n",x->dll,n);else report("Unresolved import %s ordinal %u\n",x->dll,x->ordinal);return 0;
 }
+static int fp_has(unsigned i){return (fp_mask>>( (fp_top+i)&7))&1;}
+static double fp_get(unsigned i){return fp[(fp_top+i)&7];}
+static void fp_put(unsigned i,double v){unsigned k=(fp_top+i)&7;fp[k]=v;fp_mask|=1u<<k;}
+static int fp_push(double v){unsigned k=(fp_top+7)&7;if(fp_mask&(1u<<k))return 0;fp_top=k;fp_put(0,v);return 1;}
+static int fp_pop(void){if(!fp_has(0))return 0;fp_mask&=~(1u<<fp_top);fp_top=(fp_top+1)&7;return 1;}
+static void fp_compare(double a,double b){fp_status&=~0x4500u;if(a!=a||b!=b)fp_status|=0x4500;else if(a<b)fp_status|=0x100;else if(a==b)fp_status|=0x4000;}
+static uint16_t fp_sw(void){return (fp_status&~0x3800u)|(fp_top<<11);}
+static int fp_arith(unsigned g,double a,double b,double*out){switch(g){case 0:*out=a+b;break;case 1:*out=a*b;break;case 4:*out=a-b;break;case 5:*out=b-a;break;case 6:if(b==0)return 0;*out=a/b;break;case 7:if(a==0)return 0;*out=b/a;break;default:return 0;}return 1;}
+static int fp_step(unsigned op,unsigned fs){unsigned m=byte(),g=m>>3&7,k=m&7;double v=0,z=0;Operand o;uint8_t*p;
+ if(fault)return 0;
+ if(m>=192){
+  if(op==0xdf&&m==0xe0){r[0]=(r[0]&0xffff0000u)|fp_sw();return 1;}
+  if(op==0xdb&&m==0xe3){fp_top=fp_mask=fp_status=0;fp_control=0x37f;return 1;}
+  if(op==0xdb&&m==0xe2){fp_status&=~0x80ffu;return 1;}
+  if(op==0xd9&&m>=0xe8&&m<=0xee){static const double constants[]={1,3.321928094887362,1.4426950408889634,3.141592653589793,0.3010299956639812,0.6931471805599453,0};return fp_push(constants[m-0xe8]);}
+  if(op==0xd9&&g==0){return fp_has(k)&&fp_push(fp_get(k));}
+  if(op==0xdd&&g==0){fp_mask&=~(1u<<((fp_top+k)&7));return 1;}
+  if(!fp_has(0))return 0;
+  if(op==0xd9&&m==0xe0){fp_put(0,-fp_get(0));return 1;}
+  if(op==0xd9&&m==0xe1){v=fp_get(0);fp_put(0,v<0?-v:v);return 1;}
+  if(op==0xd9&&m==0xe4){fp_compare(fp_get(0),0);return 1;}
+  if(op==0xd9&&g==1){if(!fp_has(k))return 0;v=fp_get(k);fp_put(k,fp_get(0));fp_put(0,v);return 1;}
+  if(op==0xdd&&(g==2||g==3)){fp_put(k,fp_get(0));return g==2||fp_pop();}
+  if(!fp_has(k))return 0;
+  if(op==0xd8){if(g==2||g==3){fp_compare(fp_get(0),fp_get(k));return g==2||fp_pop();}if(!fp_arith(g,fp_get(0),fp_get(k),&z))return 0;fp_put(0,z);return 1;}
+  if(op==0xdc||op==0xde){if(op==0xde&&m==0xd9){fp_compare(fp_get(0),fp_get(1));return fp_pop()&&fp_pop();}if(g==2||g==3)return 0;unsigned gg=g>=4?g^1:g;if(!fp_arith(gg,fp_get(k),fp_get(0),&z))return 0;fp_put(k,z);return op==0xdc||fp_pop();}
+  if(op==0xdd&&(g==4||g==5)){fp_compare(fp_get(0),fp_get(k));return g==4||fp_pop();}
+  return 0;
+ }
+ o=decode(m,fs);if(fault)return 0;
+ if(op==0xd9&&(g==5||g==7)){p=ptr(o.addr,2);if(!p)return 0;if(g==5)fp_control=le16(p);else{p[0]=fp_control;p[1]=fp_control>>8;}return 1;}
+ if(op==0xdd&&g==7){p=ptr(o.addr,2);if(!p)return 0;uint16_t sw=fp_sw();p[0]=sw;p[1]=sw>>8;return 1;}
+ if(op==0xd9||op==0xdd){unsigned w=op==0xd9?4:8;if(g!=0&&g!=2&&g!=3)return 0;p=ptr(o.addr,w);if(!p)return 0;if(g==0){if(w==4){float x;memcpy(&x,p,4);v=x;}else memcpy(&v,p,8);return fp_push(v);}if(!fp_has(0))return 0;v=fp_get(0);if(w==4){float x=(float)v;memcpy(p,&x,4);}else memcpy(p,&v,8);return g==2||fp_pop();}
+ if(op==0xdb||op==0xdf){unsigned w=op==0xdb?4:(g==5||g==7?8:2);if(g!=0&&!(op==0xdf&&g==5))return 0;p=ptr(o.addr,w);if(!p)return 0;if(w==2)v=(int16_t)le16(p);else if(w==4)v=(int32_t)le32(p);else{int64_t x;memcpy(&x,p,8);v=(double)x;}return fp_push(v);}
+ if(op==0xd8||op==0xdc||op==0xda||op==0xde){unsigned w=op==0xdc?8:op==0xde?2:4;p=ptr(o.addr,w);if(!p||!fp_has(0))return 0;if(op==0xd8){float x;memcpy(&x,p,4);v=x;}else if(op==0xdc)memcpy(&v,p,8);else v=w==2?(int16_t)le16(p):(int32_t)le32(p);if(g==2||g==3){fp_compare(fp_get(0),v);return g==2||fp_pop();}if(!fp_arith(g,fp_get(0),v,&z))return 0;fp_put(0,z);return 1;}
+ return 0;
+}
 static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0,repeat=0;Operand o;if(fault)return 0;for(unsigned p=0;p<4&&(op==0x64||op==0x66||op==0xf2||op==0xf3);p++){if(op==0x64)fs=1;else if(op==0x66)os16=1;else repeat=op;op=byte();if(fault)return 0;}if(op>=0xa4&&op<=0xaf&&(op<0xa8||op>0xa9)){
  unsigned width=(op&1)?(os16?2:4):1;uint32_t count=repeat?r[1]:1;
  if(count>1048576u){report("String operation limit at %08x count=%u\n",start,count);return 0;}
@@ -248,6 +287,8 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  goto completed;
  }
  if(repeat)goto unsupported;
+ if(op>=0xd8&&op<=0xdf&&!os16){if(!fp_step(op,fs))goto unsupported;goto completed;}
+ if(op==0x9b&&!os16)goto completed;
  if(os16){if(!step16(op,fs))goto unsupported;goto completed;}
  if(op>=0x50&&op<=0x57&&!fs){v=r[op-0x50];push(v);}
  else if(op>=0x58&&op<=0x5f&&!fs){v=pop();r[op-0x58]=v;}
@@ -300,10 +341,10 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  if(fault){report("Guest memory stop at %08x op=%02x\n",start,op);return 0;}steps++;if(steps<=128)report("%03u %08x %s%02x -> %08x\n",steps,start,os16?"66 ":fs?"64 ":"",op,ip);return 1;
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
-static int test(void){uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R20 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
+static int test(void){double z;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
+static int run(const char*path){report("Skrillex R21 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; graphics unavailable\n",api_calls);}else if(path){free(image);free(stack);free(heap);return 2;}free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R20.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R21.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
