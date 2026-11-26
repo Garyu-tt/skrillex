@@ -2,13 +2,13 @@
 
 Independent experimental deterministic threshold-graph x86 runtime for Nintendo Switch. No Wine, Latitude, Box64 or installed-title launcher. The game is not distributed with this repository.
 
-## R42
+## R43
 
 PE32 loader, guest memory, stack, TEB, isolated heap, import table with synthetic dispatch tokens, partial x86 integer interpreter and partial Win32 process services. Threshold graphs implement integer add/subtract/XOR; multiplication, division, and other operations still use native C arithmetic. Not a full neural implementation of Windows.
 
-Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R42.log`.
+Target: `sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe`. Build with devkitPro/libnx. The NRO logs executed instructions and stops at unsupported operations. Log: `sdmc:/switch/Skrillex-R43.log`.
 
-Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R42 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
+Last verified GTA host trace: R28, 16454 guest instructions, 77 API calls, 214 bound import tokens (not 214 implemented APIs). R28 stopped at x86 BSR (0F BD), implemented in R29. R29–R43 GTA trace has not been verified. Physical hardware confirmed through R16 (2202 instructions, 43 calls).
 
 Limitations: simulated XP-compatible process environment, single-thread critical sections and TLS, fixed 8 MiB guest heap, limited CP1252 and Latin case mapping/classification, no full file system, DLL loader, Direct3D, audio, or full x86 support. Host trace is not a proof of Windows semantic equivalence or game playability. Unknown functions stop execution.
 
@@ -35,3 +35,5 @@ R39 adds guest INDEX16/INDEX32 buffers, Lock/Unlock/GetDesc, SetIndices/GetIndic
 R40 adds single-level A8R8G8B8/X8R8G8B8 textures (32 live, up to 1024x1024 within the shared 8 MiB heap), CreateTexture/LockRect/UnlockRect, GetLevelDesc/GetLevelCount, stage-0 binding and sampler states. XYZRHW+DIFFUSE+TEX1 (0x144) vertices use affine fixed-point UV interpolation, point or bilinear sampling (matching min/mag filters), wrap or clamp and diffuse modulation. No mipmaps, compressed formats, perspective correction, other texture-stage operations or GPU presentation. Synthetic fixture includes a 2x2 texture and exact expected pixel colors. R40 is not yet compiled or executed; last verified GTA trace is still R28.
 
 R41 adds DXT1/3/5 (BC1/2/3) block-compressed storage and per-texel decoding including alpha modes, block-row pitch, and partial edge blocks. R42 adds packed mip chains, level-specific descriptors and locks, and explicit managed-texture LOD selection. No automatic derivative-based mip selection, trilinear filtering or generated mip levels. Regression fixtures cover compressed memory sizes, color/alpha interpolation, level offsets and selected-level sampling. Compilation and execution have not been verified. GTA trace remains R28.
+
+R43 adds row-vector World/View/Projection matrices and viewport state, XYZ+DIFFUSE and XYZ+DIFFUSE+TEX1 vertices, and reciprocal-W perspective-correct UV interpolation. Matrix and viewport parameters are bounded; vertices outside the homogeneous clip volume reject the draw rather than performing polygon clipping. No normals, lighting, full fixed-function pipeline or native presentation yet. Synthetic tests cover matrix round-trip, translation, viewport, transformed triangle and perspective interpolation. Local GitHub DNS lookup failed again; compilation and test execution remain unverified. Last verified GTA trace remains R28.
