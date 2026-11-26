@@ -435,17 +435,28 @@ static void transform_reset(void){
  viewport=(GuestViewport){0,0,d3d_width,d3d_height,0,1};
 }
 static int transform_index(uint32_t id){return id==256?0:id==2?1:id==3?2:-1;}
-static int transform_position(float x,float y,float z,double*out){
+static int transform_clip(float x,float y,float z,double*out){
  double v[4]={x,y,z,1},q[4];
  for(unsigned m=0;m<3;m++){
   for(unsigned j=0;j<4;j++){q[j]=0;for(unsigned i=0;i<4;i++)q[j]+=v[i]*transforms[m][i*4+j];}
   memcpy(v,q,sizeof v);
  }
- /* Conservative initial subset: accept only inside clip volume, no polygon clipping yet. */
- if(!(v[3]>=1.0/4096&&v[3]<=4096&&v[0]>=-v[3]&&v[0]<=v[3]&&v[1]>=-v[3]&&v[1]<=v[3]&&v[2]>=0&&v[2]<=v[3]))return 0;
- out[0]=viewport.x+(1+v[0]/v[3])*viewport.w*0.5;
- out[1]=viewport.y+(1-v[1]/v[3])*viewport.h*0.5;
- out[2]=viewport.minz+(v[2]/v[3])*(viewport.maxz-viewport.minz);
+ for(unsigned i=0;i<4;i++)if(!(v[i]>=-1e12&&v[i]<=1e12))return 0;
+ memcpy(out,v,4*sizeof(double));return 1;
+}
+static int project_clip(const double*v,double*out){
+ if(!(v[3]>=1.0/4096&&v[3]<=4096))return 0;
+ double x=v[0]/v[3],y=v[1]/v[3],z=v[2]/v[3];
+ if(!(x>=-1.000001&&x<=1.000001&&y>=-1.000001&&y<=1.000001&&z>=-0.000001&&z<=1.000001))return 0;
+ if(x<-1)x=-1;
+ if(x>1)x=1;
+ if(y<-1)y=-1;
+ if(y>1)y=1;
+ if(z<0)z=0;
+ if(z>1)z=1;
+ out[0]=viewport.x+(1+x)*viewport.w*0.5;
+ out[1]=viewport.y+(1-y)*viewport.h*0.5;
+ out[2]=viewport.minz+z*(viewport.maxz-viewport.minz);
  out[3]=1/v[3];return 1;
 }
 static int texture_live(void){for(unsigned i=0;i<TEX_MAX;i++)if(textures[i].com.refs)return 1;return 0;}
@@ -490,19 +501,56 @@ static int d3d_object(D3DObject*o,unsigned count,const char*const*names){
 /* Reference subset: screen-space XYZRHW + diffuse ARGB; optional D16, no blending.
  * Integer subpixel coordinates and top-left coverage make rasterization reproducible. */
 typedef struct{int64_t x,y;uint32_t color;uint16_t depth;int32_t u,v;int64_t rhw;} RasterVertex;
-static int raster_vertex(const uint8_t*p,RasterVertex*out){
+typedef struct{double p[4],color[4],u,v;} PipelineVertex;
+static int pipeline_vertex(const uint8_t*p,PipelineVertex*out){
  float x,y,z,w;memcpy(&x,p,4);memcpy(&y,p+4,4);memcpy(&z,p+8,4);
- double v[4];unsigned pre=(d3d_fvf&0x0e)==4,off=pre?16:12;
- if(pre){memcpy(&w,p+12,4);v[0]=x;v[1]=y;v[2]=z;v[3]=w;}
- else if(!transform_position(x,y,z,v))return 0;
- if(!(v[0]>=-8192&&v[0]<=8192&&v[1]>=-8192&&v[1]<=8192&&v[2]>=0&&v[2]<=1&&v[3]>=1.0/4096&&v[3]<=4096))return 0;
- out->x=(int64_t)(v[0]*256.0+(v[0]<0?-0.5:0.5));
- out->y=(int64_t)(v[1]*256.0+(v[1]<0?-0.5:0.5));out->color=le32(p+off);
- out->depth=(uint16_t)(v[2]*65535.0+0.5);out->u=out->v=0;out->rhw=(int64_t)(v[3]*1048576.0+0.5);
+ unsigned pre=(d3d_fvf&0x0e)==4,off=pre?16:12;
+ if(pre){
+  memcpy(&w,p+12,4);out->p[0]=x;out->p[1]=y;out->p[2]=z;out->p[3]=w;
+  if(!(x>=-8192&&x<=8192&&y>=-8192&&y<=8192&&z>=0&&z<=1&&w>=1.0/4096&&w<=4096))return 0;
+ }else if(!transform_clip(x,y,z,out->p))return 0;
+ uint32_t c=le32(p+off);for(unsigned k=0;k<4;k++)out->color[k]=(c>>(k*8))&255;
+ out->u=out->v=0;
  if(d3d_fvf&0x100){float u,t;memcpy(&u,p+off+4,4);memcpy(&t,p+off+8,4);
   if(!(u>=-8&&u<=8&&t>=-8&&t<=8))return 0;
-  out->u=(int32_t)((double)u*65536.0);out->v=(int32_t)((double)t*65536.0);}
+  out->u=u;out->v=t;}
  return 1;
+}
+static int pipeline_project(PipelineVertex in,RasterVertex*out){
+ double v[4];
+ if((d3d_fvf&0x0e)==4)memcpy(v,in.p,sizeof v);
+ else if(!project_clip(in.p,v))return 0;
+ out->x=(int64_t)(v[0]*256.0+(v[0]<0?-0.5:0.5));
+ out->y=(int64_t)(v[1]*256.0+(v[1]<0?-0.5:0.5));
+ out->color=0;for(unsigned k=0;k<4;k++){double c=in.color[k];if(c<0)c=0;if(c>255)c=255;out->color|=(uint32_t)(c+0.5)<<(k*8);}
+ out->depth=(uint16_t)(v[2]*65535.0+0.5);out->rhw=(int64_t)(v[3]*1048576.0+0.5);
+ out->u=(int32_t)(in.u*65536.0);out->v=(int32_t)(in.v*65536.0);return 1;
+}
+/* Six D3D homogeneous planes plus two numeric reciprocal-W guard planes. */
+static double clip_distance(PipelineVertex v,unsigned plane){
+ double x=v.p[0],y=v.p[1],z=v.p[2],w=v.p[3];
+ switch(plane){case 0:return w-1.0/4096;case 1:return 4096-w;case 2:return w+x;case 3:return w-x;case 4:return w+y;case 5:return w-y;case 6:return z;default:return w-z;}
+}
+static PipelineVertex clip_lerp(PipelineVertex a,PipelineVertex b,double t,unsigned plane){
+ PipelineVertex v;for(unsigned k=0;k<4;k++){v.p[k]=a.p[k]+(b.p[k]-a.p[k])*t;v.color[k]=a.color[k]+(b.color[k]-a.color[k])*t;}
+ v.u=a.u+(b.u-a.u)*t;v.v=a.v+(b.v-a.v)*t;
+ /* Snap the intersected coordinate to its exact plane. */
+ switch(plane){case 0:v.p[3]=1.0/4096;break;case 1:v.p[3]=4096;break;case 2:v.p[0]=-v.p[3];break;case 3:v.p[0]=v.p[3];break;case 4:v.p[1]=-v.p[3];break;case 5:v.p[1]=v.p[3];break;case 6:v.p[2]=0;break;case 7:v.p[2]=v.p[3];break;}
+ return v;
+}
+static unsigned clip_triangle(PipelineVertex a,PipelineVertex b,PipelineVertex c,PipelineVertex*out){
+ PipelineVertex p[16]={a,b,c},q[16];unsigned n=3;
+ for(unsigned plane=0;plane<8&&n;plane++){
+  unsigned m=0;PipelineVertex prev=p[n-1];double dp=clip_distance(prev,plane);
+  for(unsigned i=0;i<n;i++){
+   PipelineVertex cur=p[i];double dc=clip_distance(cur,plane);
+   if((dp<0&&dc>0)||(dp>0&&dc<0)){if(m==16)return 0;q[m++]=clip_lerp(prev,cur,dp/(dp-dc),plane);}
+   if(dc>=0){if(m==16)return 0;q[m++]=cur;}
+   prev=cur;dp=dc;
+  }
+  n=m;memcpy(p,q,n*sizeof *p);
+ }
+ memcpy(out,p,n*sizeof *p);return n;
 }
 static int64_t perspective_uv(int64_t wa,int64_t wb,int64_t wc,RasterVertex a,RasterVertex b,RasterVertex c,unsigned vertical){
  __int128 qa=(__int128)wa*a.rhw,qb=(__int128)wb*b.rhw,qc=(__int128)wc*c.rhw;
@@ -524,6 +572,7 @@ static void raster_triangle(RasterVertex a,RasterVertex b,RasterVertex c){
  if(t<0)t=0;
  if(rgt>=(int64_t)d3d_width)rgt=d3d_width-1;
  if(btm>=(int64_t)d3d_height)btm=d3d_height-1;
+ if((d3d_fvf&0x0e)!=4){if(l<(int64_t)viewport.x)l=viewport.x;if(t<(int64_t)viewport.y)t=viewport.y;if(rgt>=(int64_t)viewport.x+viewport.w)rgt=(int64_t)viewport.x+viewport.w-1;if(btm>=(int64_t)viewport.y+viewport.h)btm=(int64_t)viewport.y+viewport.h-1;}
  int ta=raster_top_left(b,c),tb=raster_top_left(c,a),tc=raster_top_left(a,b);
  for(int64_t y=t;y<=btm;y++)for(int64_t x=l;x<=rgt;x++){
   int64_t px=x*256,py=y*256;
@@ -547,13 +596,20 @@ static void raster_triangle(RasterVertex a,RasterVertex b,RasterVertex c){
   color_buffer[pixel]=color;
  }
 }
+static void pipeline_triangle(PipelineVertex a,PipelineVertex b,PipelineVertex c){
+ PipelineVertex poly[16];unsigned n;
+ if((d3d_fvf&0x0e)==4){poly[0]=a;poly[1]=b;poly[2]=c;n=3;}else n=clip_triangle(a,b,c,poly);
+ if(n<3)return;
+ RasterVertex v[16];for(unsigned i=0;i<n;i++)if(!pipeline_project(poly[i],&v[i]))return;
+ for(unsigned i=1;i+1<n;i++)raster_triangle(v[0],v[i],v[i+1]);
+}
 static int draw_up(uint32_t kind,uint32_t count,uint32_t addr,uint32_t stride){
  unsigned bytes=vertex_bytes();if(!d3d_scene||!bytes||!texture_ready()||stride<bytes||stride>256||!count||count>256)return 0;
- if((uint64_t)count*d3d_width*d3d_height>UINT64_C(32000000))return 0;
+ if((uint64_t)count*d3d_width*d3d_height*((d3d_fvf&0x0e)==4?1:9)>UINT64_C(32000000))return 0;
  if(kind!=4&&kind!=5&&kind!=6)return 0;
  unsigned n=kind==4?count*3:count+2;uint8_t*p=ptr(addr,(n-1)*stride+bytes);if(!p)return 0;
- RasterVertex v[768];for(unsigned i=0;i<n;i++)if(!raster_vertex(p+i*stride,&v[i]))return 0;
- for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;raster_triangle(v[a],v[b],v[c]);}
+ PipelineVertex v[768];for(unsigned i=0;i<n;i++)if(!pipeline_vertex(p+i*stride,&v[i]))return 0;
+ for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;pipeline_triangle(v[a],v[b],v[c]);}
  d3d_draws++;return 1;
 }
 static GuestVB* vb_find(uint32_t obj){for(unsigned i=0;i<VB_MAX;i++)if(vertex_buffers[i].com.refs&&vertex_buffers[i].com.obj==obj)return &vertex_buffers[i];return NULL;}
@@ -603,21 +659,21 @@ static int ib_call(const char*n,unsigned*argc,uint32_t*ret){
 }
 static int draw_indexed(uint32_t kind,int32_t basevert,uint32_t minidx,uint32_t nvert,uint32_t first,uint32_t count){
  unsigned bytes=vertex_bytes();if(!d3d_scene||!bytes||!texture_ready()||stream_stride<bytes||!stream0||stream0->locked||!index_stream||index_stream->locked||!nvert||!count||count>256||(kind!=4&&kind!=5&&kind!=6))return 0;
- if((uint64_t)count*d3d_width*d3d_height>UINT64_C(32000000))return 0;
+ if((uint64_t)count*d3d_width*d3d_height*((d3d_fvf&0x0e)==4?1:9)>UINT64_C(32000000))return 0;
  unsigned ni=kind==4?count*3:count+2,iw=index_stream->format==101?2:4;
  uint64_t off=(uint64_t)first*iw;
  if(off+(uint64_t)ni*iw>index_stream->length)return 0;
  uint8_t*idx=ptr(index_stream->data+(uint32_t)off,ni*iw);if(!idx)return 0;
- RasterVertex v[768];
+ PipelineVertex v[768];
  for(unsigned i=0;i<ni;i++){
   uint32_t ix=iw==2?le16(idx+i*iw):le32(idx+i*iw);
   if(ix<minidx||(uint64_t)ix-minidx>=nvert)return 0;
   int64_t vi=(int64_t)basevert+ix;if(vi<0)return 0;
   uint64_t voff=(uint64_t)stream_offset+(uint64_t)vi*stream_stride;
   if(voff+bytes>stream0->length)return 0;
-  uint8_t*p=ptr(stream0->data+(uint32_t)voff,bytes);if(!p||!raster_vertex(p,&v[i]))return 0;
+  uint8_t*p=ptr(stream0->data+(uint32_t)voff,bytes);if(!p||!pipeline_vertex(p,&v[i]))return 0;
  }
- for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;raster_triangle(v[a],v[b],v[c]);}
+ for(unsigned i=0;i<count;i++){unsigned a=kind==4?i*3:kind==5?i:0,b=kind==4?i*3+1:i+1,c=kind==4?i*3+2:i+2;pipeline_triangle(v[a],v[b],v[c]);}
  d3d_draws++;return 1;
 }
 static int texture_call(const char*n,unsigned*argc,uint32_t*ret){
@@ -1071,12 +1127,12 @@ static int step(void){uint32_t start=ip,v,a,b;unsigned op=byte(),m,g,fs=0,os16=0
  unsupported:report("Unsupported x86 at %08x opcode=%02x\n",start,op);return 0;}
 static int load(const char*path){uint8_t dos[64],coff[24],opt[512],sec[40];FILE*f=fopen(path,"rb");if(!f){report("EXE open failed\n");return 0;}int ok=0;if(fread(dos,1,64,f)!=64||le16(dos)!=0x5a4d)goto done;uint32_t off=le32(dos+60);if(off>0x100000||fseek(f,off,SEEK_SET)||fread(coff,1,24,f)!=24||le32(coff)!=0x4550||le16(coff+4)!=0x14c)goto done;unsigned n=le16(coff+6),os=le16(coff+20);if(!n||n>96||os<96||os>sizeof opt||fread(opt,1,os,f)!=os||le16(opt)!=0x10b)goto done;base=le32(opt+28);size=le32(opt+56);uint32_t entry=le32(opt+16),headers=le32(opt+60);if(!size||size>64u*1024*1024||entry>=size||headers>size||(uint64_t)base+size>BASESTACK)goto done;image=calloc(1,size);stack=calloc(1,STACKSIZE);heap=calloc(1,HEAPSIZE);if(!image||!stack||!heap)goto done;if(fseek(f,0,SEEK_SET)||fread(image,1,headers,f)!=headers)goto done;for(unsigned i=0;i<n;i++){if(fseek(f,off+24+os+40*i,SEEK_SET)||fread(sec,1,40,f)!=40)goto done;uint32_t va=le32(sec+12),len=le32(sec+16),raw=le32(sec+20);if((uint64_t)va+len>size)goto done;if(len&&(fseek(f,raw,SEEK_SET)||fread(image+va,1,len,f)!=len))goto done;}ip=base+entry;r[4]=BASESTACK+STACKSIZE-16;memset(teb,0,sizeof teb);write32(TEBBASE,0xffffffffu);write32(TEBBASE+4,BASESTACK+STACKSIZE);write32(TEBBASE+8,BASESTACK);write32(TEBBASE+0x18,TEBBASE);report("PE32 base=%08x image=%u sections=%u entry=%08x\n",base,size,n,ip);if(os>=112){imports_rva=le32(opt+104);imports_size=le32(opt+108);report("Imports RVA=%08x\n",imports_rva);if(!bind_imports())goto done;}ok=1;done:fclose(f);if(!ok)report("PE loader rejected image\n");return ok;}
 static int test(void){double z;cflag=0;if(shift_group(0,0x81,1,8)!=3||!cflag||!oflag)return 0;cflag=1;if(shift_group(3,0,1,32)!=0x80000000u||cflag!=0||!oflag)return 0;if(shift_group(7,0x8000,3,16)!=0xf000)return 0;if(shift_group(4,1,32,32)!=1)return 0;if(!fp_push(3.0)||!fp_push(9.0)||!fp_arith(6,fp_get(0),fp_get(1),&z)||z!=3.0)return 0;fp_compare(1,2);if(!(fp_sw()&0x100)||!fp_pop()||!fp_pop()||fp_mask)return 0;fp_top=fp_status=0;uint32_t s=0x12345678;for(unsigned i=0;i<1024;i++){s=s*1664525u+1013904223u;uint32_t a=s;s=s*1664525u+1013904223u;uint32_t b=s;if(ga(a,b)!=a+b||gx(a,b)!=(a^b)||gs(a,b)!=a-b)return 0;}if(alu(7,0,1)!=0xffffffffu||!cflag||!sflag||!condition(2)||condition(4))return 0;if(alu(7,0x80000000u,1)!=0x7fffffffu||!oflag||!condition(12))return 0;if(alu(7,42,42)!=0||!condition(4)||!pflag)return 0;for(unsigned a=0;a<256;a++)for(unsigned b=0;b<256;b++){unsigned v=alu8(7,a,b);if(v!=((a-b)&255)||cflag!=(a<b)||zflag!=(a==b)||sflag!=(v>>7))return 0;}if(alu16(0,65535,1)!=0||!zflag||!cflag)return 0;if(alu16(7,0x8000,1)!=0x7fff||!oflag)return 0;cflag=1;if(alu(2,UINT32_MAX,0)!=0||!cflag||!zflag)return 0;cflag=1;if(alu(3,0,UINT32_MAX)!=0||!cflag||!zflag)return 0;cflag=1;if(alu8(2,127,0)!=128||!oflag)return 0;cflag=1;if(alu16(3,0,0)!=65535||!cflag)return 0;return 1;}
-static int run(const char*path){report("Skrillex R43 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
+static int run(const char*path){report("Skrillex R44 (no Wine)\n");if(!test()){report("ALU FAIL\n");return 1;}report("ALU PASS: 3072 graph arithmetic, 65536 byte comparisons, flag checks\n");zflag=sflag=cflag=oflag=pflag=aflag=dflag=0;if(path&&load(path)){for(unsigned i=0;i<100000;i++)if(!step())break;if(steps==100000)report("Instruction budget reached\n");report("Last executed instructions:\n");unsigned begin=trace_count>TRACE_LEN?trace_count-TRACE_LEN:0;
  for(unsigned i=begin;i<trace_count;i++){TraceEntry*t=&trace_ring[i%TRACE_LEN];report("%u %08x %02x -> %08x flags=%x\n",i+1,t->from,t->op,t->to,t->flags);}
  report("Registers EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x EIP=%08x\n",r[0],r[1],r[2],r[3],r[4],r[5],r[6],r[7],ip);
  report("Executed guest instructions: %u\n",steps);report("Win32 calls completed: %u; reference frames: %u\n",api_calls,d3d_frames);}else if(path){free(image);free(stack);free(heap);return 2;}d3d_cleanup();close_guest_files();free(image);free(stack);free(heap);return 0;}
 #ifdef __SWITCH__
-int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R43.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
+int main(void){consoleInit(NULL);PadState pad;padConfigureInput(1,HidNpadStyleSet_NpadStandard);padInitializeDefault(&pad);logfile=fopen("sdmc:/switch/Skrillex-R44.log","w");run("sdmc:/games/Grand Theft Auto San Andreas/gta_sa.exe");if(logfile){fclose(logfile);logfile=NULL;}report("B/+ exits\n");while(appletMainLoop()){padUpdate(&pad);if(padGetButtonsDown(&pad)&(HidNpadButton_B|HidNpadButton_Plus))break;consoleUpdate(NULL);}consoleExit(NULL);return 0;}
 #else
 int main(int argc,char**argv){return run(argc>1?argv[1]:NULL);}
 #endif
