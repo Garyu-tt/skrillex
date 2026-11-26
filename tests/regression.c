@@ -48,6 +48,28 @@ static void xadd_fixture(void){
  uint32_t prev=r[0];assert(!step()&&r[0]==prev&&!fault&&steps==5);
  free(image);free(stack);image=stack=NULL;size=0;steps=0;
 }
+static void cmpxchg_fixture(void){
+ static const uint8_t code[]={
+  0x0f,0xb1,0xd9, /* cmpxchg ecx, ebx: match */
+  0x0f,0xb1,0xd9, /* mismatch */
+  0x0f,0xb0,0xe1, /* cmpxchg cl, ah */
+  0x66,0x0f,0xb1,0xd9, /* cmpxchg cx, bx */
+  0xf0,0x0f,0xb1,0x1d,0x00,0x01,0x40,0x00, /* lock cmpxchg memory, ebx */
+  0xf0,0x0f,0xb1,0xd9 /* invalid lock register */
+ };
+ base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);memcpy(image,code,sizeof code);
+ fault=0;ip=base;steps=0;memset(r,0,sizeof r);r[0]=7;r[1]=7;r[3]=9;
+ assert(step()&&r[0]==7&&r[1]==9&&r[3]==9&&zflag&&!cflag);
+ assert(step()&&r[0]==9&&r[1]==9&&!zflag&&cflag);
+ r[0]=0x12348001;r[1]=0x87654301;
+ assert(step()&&r[0]==0x12348001&&r[1]==0x87654380&&zflag);
+ r[0]=0xabcd8000;r[1]=0x12340001;r[3]=0x567800ff;
+ assert(step()&&r[0]==0xabcd0001&&r[1]==0x12340001&&!zflag&&oflag);
+ write32(base+256,11);r[0]=11;r[3]=42;
+ assert(step()&&read32(base+256)==42&&r[0]==11&&zflag);
+ uint32_t old=r[1];assert(!step()&&r[1]==old&&!fault&&steps==5);
+ free(image);free(stack);image=stack=NULL;size=0;steps=0;
+}
 static void tsc_fixture(void){
  static const uint8_t program[]={0x0f,0x31,0x0f,0x31,0x0f,0xa2};
  base=0x400000;size=512;image=calloc(1,size);stack=calloc(1,STACKSIZE);assert(image&&stack);memcpy(image,program,sizeof program);
@@ -471,4 +493,4 @@ static void d3d_fixture(void){
  assert(d3d_fixture_call(com_token(dev,2),(uint32_t[]){dev},1)==0&&!color_buffer&&!depth_buffer&&!d3d_root.refs);
  d3d_cleanup();free(image);free(stack);free(heap);image=stack=heap=NULL;size=0;
 }
-int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();xadd_fixture();tsc_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
+int main(void){setvbuf(stdout,NULL,_IONBF,0);assert(test());dynamic_import_fixture();instruction_fixture();xadd_fixture();cmpxchg_fixture();tsc_fixture();user_window_fixture();file_fixture();d3d_fixture();puts("Synthetic x86, imports, window, file and D3D9 reference fixtures: PASS");return 0;}
