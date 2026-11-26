@@ -1,4 +1,4 @@
-name: NeroExec R03 Switch build
+name: Skrillex R06 Switch build
 on:
   push:
   workflow_dispatch:
@@ -17,15 +17,15 @@ jobs:
           export DEVKITPRO=/opt/devkitpro
           export DEVKITA64="$DEVKITPRO/devkitA64"
           export PATH="$DEVKITA64/bin:$DEVKITPRO/tools/bin:$PATH"
-          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o NeroExec-R03.elf
-          nacptool --create NeroExec InfraCare 0.3.0 NeroExec-R03.nacp
-          elf2nro NeroExec-R03.elf NeroExec-R03.nro --nacp=NeroExec-R03.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
-          test "$(dd if=NeroExec-R03.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
-          sha256sum NeroExec-R03.nro > SHA256SUMS
+          aarch64-none-elf-gcc -O2 -Wall -Wextra -D__SWITCH__ -march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE -ffunction-sections -fdata-sections -I"$DEVKITPRO/libnx/include" -L"$DEVKITPRO/libnx/lib" -specs="$DEVKITPRO/libnx/switch.specs" source/main.c -Wl,--gc-sections -lnx -o Skrillex-R06.elf
+          nacptool --create Skrillex InfraCare 0.6.0 Skrillex-R06.nacp
+          elf2nro Skrillex-R06.elf Skrillex-R06.nro --nacp=Skrillex-R06.nacp --icon="$DEVKITPRO/libnx/default_icon.jpg"
+          test "$(dd if=Skrillex-R06.nro bs=1 skip=16 count=4 2>/dev/null)" = NRO0
+          sha256sum Skrillex-R06.nro > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
-          name: NeroExec-R03-Switch
+          name: Skrillex-R06-Switch
           path: |
-            NeroExec-R03.nro
+            Skrillex-R06.nro
             SHA256SUMS
           if-no-files-found: error
